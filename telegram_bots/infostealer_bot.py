@@ -12,12 +12,14 @@ import os
 import re
 import logging
 from datetime import datetime
+from pathlib import Path
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, ChannelPrivateError, FloodWaitError
 
 # Import custom modules
 from logger import setup_logging
 from telethon_download_manager import TelethonDownloadManager as DownloadManager, get_media_size, format_file_size
+from master_workflow_orchestrator import MasterWorkflowOrchestrator
 
 # Default configuration
 DEFAULT_SESSION = 'entrospies_session'
@@ -281,6 +283,93 @@ def sanitize_filename(filename):
     filename = filename.strip('._')
     return filename[:50]  # Limit length
 
+def is_message_already_downloaded(channel_info, message_id, download_dir):
+    """Check if message is already downloaded by looking for existing JSON file and attachments."""
+    try:
+        channel_dir = sanitize_filename(channel_info['title'])
+        # Check multiple possible date folders (current and recent days)
+        base_path = Path(download_dir) / channel_dir
+        
+        if not base_path.exists():
+            return False
+        
+        # Look for message JSON file in any date folder
+        for date_folder in base_path.iterdir():
+            if date_folder.is_dir():
+                message_file = date_folder / f"{message_id}_message.json"
+                if message_file.exists():
+                    # Message JSON exists, now check if attachments are also downloaded
+                    # Look for any non-JSON files that might be attachments for this message
+                    attachment_files = []
+                    for file in date_folder.iterdir():
+                        if file.is_file() and str(message_id) in file.name and not file.name.endswith('.json'):
+                            attachment_files.append(file)
+                    
+                    # If we found attachment files, consider it fully downloaded
+                    if attachment_files:
+                        return True
+                    
+                    # If no attachments found, check the JSON file to see if message had media
+                    try:
+                        with open(message_file, 'r', encoding='utf-8') as f:
+                            message_data = json.load(f)
+                        
+                        # If message had no media, then JSON file is sufficient
+                        if not message_data.get('has_media', False):
+                            return True
+                        
+                        # If message had media but no attachment files found, consider it incomplete
+                        # Return False to allow re-download
+                        return False
+                        
+                    except Exception:
+                        # If can't read JSON, be safe and allow re-download
+                        return False
+        
+        return False
+    except Exception:
+        return False
+
+def get_download_status(channel_info, message_id, download_dir):
+    """Get detailed download status for a message."""
+    try:
+        channel_dir = sanitize_filename(channel_info['title'])
+        base_path = Path(download_dir) / channel_dir
+        
+        if not base_path.exists():
+            return "No channel directory"
+        
+        # Look for message JSON file in any date folder
+        for date_folder in base_path.iterdir():
+            if date_folder.is_dir():
+                message_file = date_folder / f"{message_id}_message.json"
+                if message_file.exists():
+                    # Count attachment files
+                    attachment_files = []
+                    for file in date_folder.iterdir():
+                        if file.is_file() and str(message_id) in file.name and not file.name.endswith('.json'):
+                            attachment_files.append(file.name)
+                    
+                    try:
+                        with open(message_file, 'r', encoding='utf-8') as f:
+                            message_data = json.load(f)
+                        
+                        has_media = message_data.get('has_media', False)
+                        
+                        if has_media and attachment_files:
+                            return f"Complete (JSON + {len(attachment_files)} attachments: {', '.join(attachment_files)})"
+                        elif has_media and not attachment_files:
+                            return "Incomplete (JSON only, missing attachments)"
+                        elif not has_media:
+                            return "Complete (text-only message)"
+                        
+                    except Exception:
+                        return "JSON file corrupted"
+        
+        return "Not found"
+    except Exception:
+        return "Error checking status"
+
 def load_channels_config(config_path, logger, compliance_logger, args):
     """Load channels from config.json and filter based on arguments."""
     try:
@@ -430,13 +519,21 @@ async def get_messages_from_channel(client, channel_info, download_manager, args
             
             compliance_logger.info(f"MESSAGE_COLLECTED: Channel={channel_info['title']}, MessageID={message.id}, Date={message.date}")
             
+            # Check if message already downloaded by looking for existing JSON file and attachments
+            if is_message_already_downloaded(channel_info, message.id, args.output):
+                status = get_download_status(channel_info, message.id, args.output)
+                logger.info(f"Skipping already downloaded message {message.id}: {status}")
+                compliance_logger.info(f"DUPLICATE_SKIPPED: MessageID={message.id}, Status={status}")
+                message_data['duplicate_skipped'] = True
+                message_data['skip_reason'] = f"Already downloaded: {status}"
+                processed_messages.append(message_data)
+                continue
+            
             # Check for media and queue downloads
             if message.media and not args.dry_run:
                 media_type = type(message.media).__name__
-                message_data['media_type'] = media_type
-                
-                # Get media size before download
                 media_size = get_media_size(message)
+                message_data['media_type'] = media_type
                 message_data['media_size'] = media_size
                 message_data['media_size_formatted'] = format_file_size(media_size)
                 
@@ -557,6 +654,14 @@ async def main_process(args):
         logger.info(f"Started {len(download_workers)} download workers")
         compliance_logger.info(f"DOWNLOAD_MANAGER: Started {len(download_workers)} concurrent workers")
         
+        # Initialize master workflow orchestrator
+        workflow_orchestrator = MasterWorkflowOrchestrator(
+            base_download_dir=args.output,
+            logger=logger
+        )
+        logger.info("Master workflow orchestrator initialized")
+        compliance_logger.info("WORKFLOW_ORCHESTRATOR: Initialized for post-download processing")
+        
         # Collect messages from each channel
         all_collected_messages = []
         all_download_ids = []
@@ -605,6 +710,33 @@ async def main_process(args):
                                 downloaded_files.append(result)
                         message_data['downloaded_files'] = downloaded_files
                         del message_data['download_ids']  # Remove temporary field
+                
+                # Process messages with workflow orchestrator
+                logger.info("Starting post-download workflow processing...")
+                compliance_logger.info("WORKFLOW_PROCESSING: Starting post-download message processing")
+                
+                # Filter messages that have downloaded files or need processing
+                messages_to_process = [
+                    msg for msg in all_collected_messages 
+                    if (msg.get('downloaded_files') and any(f.get('success') for f in msg['downloaded_files'])) 
+                    or msg.get('duplicate_skipped')
+                ]
+                
+                if messages_to_process:
+                    logger.info(f"Processing {len(messages_to_process)} messages with workflows")
+                    workflow_results = workflow_orchestrator.process_messages_batch(messages_to_process)
+                    
+                    # Add workflow results to message data
+                    for message_data, workflow_result in zip(messages_to_process, workflow_results):
+                        message_data['workflow_processing'] = workflow_result
+                    
+                    # Log workflow statistics
+                    workflow_stats = workflow_orchestrator.get_processing_statistics()
+                    logger.info(f"Workflow processing completed: {workflow_stats['successful_processing']}/{workflow_stats['total_messages_processed']} successful")
+                    compliance_logger.info(f"WORKFLOW_STATS: Processed={workflow_stats['total_messages_processed']}, Success={workflow_stats['successful_processing']}, Failed={workflow_stats['failed_processing']}")
+                else:
+                    logger.info("No messages require workflow processing")
+                    compliance_logger.info("WORKFLOW_PROCESSING: No messages to process")
         
         finally:
             # Shutdown download manager
@@ -639,10 +771,14 @@ async def main_process(args):
         else:
             logger.info(f"[DRY RUN] Would save results to {args.output_file}")
         
-        # Summary
+        # Summary with duplicate detection and workflow processing statistics
         downloads_count = sum(len(msg.get('downloaded_files', [])) for msg in all_collected_messages)
-        logger.info(f"Summary: Channels processed: {len(channels)}, Messages collected: {len(all_collected_messages)}, Downloads completed: {downloads_count}")
-        compliance_logger.info(f"SESSION_SUMMARY: Processed={len(channels)}, Collected={len(all_collected_messages)}, Downloaded={downloads_count}")
+        duplicates_skipped = sum(1 for msg in all_collected_messages if msg.get('duplicate_skipped'))
+        workflow_processed = sum(1 for msg in all_collected_messages if msg.get('workflow_processing'))
+        workflow_successful = sum(1 for msg in all_collected_messages if msg.get('workflow_processing', {}).get('success'))
+        
+        logger.info(f"Summary: Channels processed: {len(channels)}, Messages collected: {len(all_collected_messages)}, Downloads completed: {downloads_count}, Duplicates skipped: {duplicates_skipped}, Workflow processed: {workflow_successful}/{workflow_processed}")
+        compliance_logger.info(f"SESSION_SUMMARY: Processed={len(channels)}, Collected={len(all_collected_messages)}, Downloaded={downloads_count}, Duplicates={duplicates_skipped}, Workflow={workflow_successful}/{workflow_processed}")
         
     except SessionPasswordNeededError:
         logger.warning("Two-factor authentication is enabled. Please enter your password:")
