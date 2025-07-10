@@ -1,0 +1,38 @@
+# Virtual Environment
+entrospies/
+
+# Environment Variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+venv_entrospies/
+
+# Logs
+*.log
+logs/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups
+*.bak
+
+# Claude context
+CLAUDE.md
+
+# session
+*.session
+session/

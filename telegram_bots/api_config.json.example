@@ -1,0 +1,15 @@
+{
+  "telegram_api": {
+    "api_id": "YOUR_API_ID",
+    "api_hash": "YOUR_API_HASH"
+  },
+  "description": "Telegram API credentials for EntroSpies project",
+  "note": "Keep this file secure and do not commit to version control",
+  "instructions": [
+    "1. Copy this file to api_config.json",
+    "2. Replace YOUR_API_ID with your actual Telegram API ID",
+    "3. Replace YOUR_API_HASH with your actual Telegram API hash",
+    "4. Get credentials from https://my.telegram.org/auth",
+    "5. Never commit api_config.json to version control"
+  ]
+}

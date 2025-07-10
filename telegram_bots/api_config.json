@@ -1,0 +1,8 @@
+{
+  "telegram_api": {
+    "api_id": 24261682,
+    "api_hash": "c6c18b8be2b390849aa6ee4289de0270"
+  },
+  "description": "Telegram API credentials for EntroSpies project",
+  "note": "Keep this file secure and do not commit to version control"
+}

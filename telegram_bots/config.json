@@ -1,0 +1,122 @@
+{
+  "timestamp": "2025-07-10T13:28:43.619391",
+  "user_info": {
+    "name": "QualgoLaboratory",
+    "username": "@qualgolab",
+    "phone": "84817662275",
+    "id": 7959124814
+  },
+  "summary": {
+    "total_channels": 12
+  },
+  "channels": [
+    {
+      "title": ".boxed.pw",
+      "username": null,
+      "id": 1935880746,
+      "participants": 14339,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/boxedpw.py"
+    },
+    {
+      "title": "Everlasting Cloud",
+      "username": null,
+      "id": 1888788841,
+      "participants": 7141,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "textbases (url:log:pass)",
+      "username": null,
+      "id": 1830108283,
+      "participants": 7477,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "INFO CLOUD",
+      "username": "infocloudurl",
+      "id": 2284704148,
+      "participants": 659,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "UNIVERSE CLOUD / txtbases",
+      "username": "universecloudtxt",
+      "id": 2227668260,
+      "participants": 3153,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "HUBHEAD | VIP SNATCH ROOM 2",
+      "username": null,
+      "id": 1659843696,
+      "participants": 5742,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "Borwita 🄵🅁🄴🄴 Logs [REDLINE]",
+      "username": "BorwitaFreeLogs",
+      "id": 1790419501,
+      "participants": 6224,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "Source News",
+      "username": "SourceDex_official",
+      "id": 2334106447,
+      "participants": 744,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "🌧 RAIN CLOUD [FREE]",
+      "username": "raincloudlogs",
+      "id": 1290870397,
+      "participants": 1280,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "BerserkLogs | Shop",
+      "username": "berserklogs",
+      "id": 1672949739,
+      "participants": 3805,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "Malware Logs | Spam | Traffic | Install",
+      "username": "MalwareLogs",
+      "id": 1383333372,
+      "participants": 361,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    },
+    {
+      "title": "cBanke [LOGS]",
+      "username": "cbanke_logs",
+      "id": 1801804580,
+      "participants": 2280,
+      "verified": false,
+      "restricted": false,
+      "parser": "infostealer_parser/parser_default.py"
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # Main EntroSpies Telegram Bot
+  entrospies-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: entrospies-bot
+    restart: unless-stopped
+    volumes:
+      # Mount configuration files
+      - ./telegram_bots/api_config.json:/app/telegram_bots/api_config.json:ro
+      - ./telegram_bots/config.json:/app/telegram_bots/config.json:ro
+      # Mount session directory for persistence
+      - ./telegram_bots/session:/app/telegram_bots/session
+      # Mount download directory for data persistence
+      - entrospies-downloads:/app/telegram_bots/download
+      # Mount logs directory for monitoring
+      - entrospies-logs:/app/telegram_bots/logs
+      # Mount parser modules
+      - ./telegram_bots/infostealer_parser:/app/telegram_bots/infostealer_parser:ro
+      # Mount utility scripts
+      - ./telegram_bots/scripts:/app/telegram_bots/scripts:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=UTC
+      # Optional: External Elasticsearch connection
+      - ELASTICSEARCH_URL=${ELASTICSEARCH_URL}
+      - ELASTICSEARCH_USERNAME=${ELASTICSEARCH_USERNAME}
+      - ELASTICSEARCH_PASSWORD=${ELASTICSEARCH_PASSWORD}
+    command: >
+      sh -c "cd telegram_bots && 
+             python3 infostealer_bot.py 
+             -s session/qualgolab_telegram.session 
+             -c config.json 
+             --api-config api_config.json 
+             -vvv 
+             -m 5"
+    networks:
+      - entrospies-network
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  # Persistent storage for downloaded files
+  entrospies-downloads:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./telegram_bots/download
+
+  # Persistent storage for logs
+  entrospies-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./telegram_bots/logs
+
+networks:
+  entrospies-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

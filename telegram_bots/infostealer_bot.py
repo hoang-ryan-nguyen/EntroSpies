@@ -1,0 +1,683 @@
+#!/usr/bin/env python3
+"""
+EntroSpies Infostealer Bot - Main Implementation
+Collects messages and attachments from Telegram infostealer channels for defensive security purposes.
+"""
+
+import argparse
+import asyncio
+import sys
+import json
+import os
+import re
+import logging
+from datetime import datetime
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError, ChannelPrivateError, FloodWaitError
+
+# Import custom modules
+from logger import setup_logging
+from telethon_download_manager import TelethonDownloadManager as DownloadManager, get_media_size, format_file_size
+
+# Default configuration
+DEFAULT_SESSION = 'entrospies_session'
+DEFAULT_CONFIG = 'config.json'
+DEFAULT_API_CONFIG = 'api_config.json'
+DEFAULT_OUTPUT_DIR = 'download'
+DEFAULT_LOGS_DIR = 'logs'
+DEFAULT_MESSAGES = 1
+DEFAULT_MAX_FILE_SIZE = 1024 * 1024 * 1024  # 1GB
+
+def parse_size(size_str):
+    """Parse size string (e.g., '500MB', '1GB') to bytes."""
+    if not size_str:
+        return 0
+    
+    size_str = size_str.upper().strip()
+    
+    # Extract number and unit
+    match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT]?B?)$', size_str)
+    if not match:
+        raise ValueError(f"Invalid size format: {size_str}. Use formats like '500MB', '1GB', etc.")
+    
+    number, unit = match.groups()
+    number = float(number)
+    
+    # Convert to bytes
+    multipliers = {
+        'B': 1,
+        'KB': 1024,
+        'MB': 1024 ** 2,
+        'GB': 1024 ** 3,
+        'TB': 1024 ** 4,
+        '': 1,  # Default to bytes if no unit
+    }
+    
+    if unit not in multipliers:
+        raise ValueError(f"Unknown size unit: {unit}")
+    
+    return int(number * multipliers[unit])
+
+def load_api_credentials(api_config_path=DEFAULT_API_CONFIG):
+    """Load Telegram API credentials from separate config file."""
+    try:
+        with open(api_config_path, 'r', encoding='utf-8') as f:
+            api_config = json.load(f)
+        
+        telegram_api = api_config.get('telegram_api', {})
+        api_id = telegram_api.get('api_id')
+        api_hash = telegram_api.get('api_hash')
+        
+        if not api_id or not api_hash:
+            raise ValueError("Missing api_id or api_hash in API configuration")
+        
+        return api_id, api_hash
+        
+    except FileNotFoundError:
+        print(f"Error: API config file {api_config_path} not found")
+        print("Please create an api_config.json file with your Telegram API credentials:")
+        print('{"telegram_api": {"api_id": YOUR_API_ID, "api_hash": "YOUR_API_HASH"}}')
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in API config file: {e}")
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+def setup_argument_parser():
+    """Setup comprehensive command-line argument parser."""
+    parser = argparse.ArgumentParser(
+        description='EntroSpies Infostealer Bot - Telegram message and attachment collector',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s                                    # Basic usage with defaults
+  %(prog)s -s my_session -v                  # Custom session with verbose logging
+  %(prog)s -m 10 --prevent-big-files         # Download 10 messages, skip large files
+  %(prog)s -c custom.json --max-file-size 500MB  # Custom config with 500MB limit
+  %(prog)s --dry-run -vvv                    # Preview mode with maximum verbosity
+  %(prog)s --channels "channel1,channel2"    # Process specific channels only
+  %(prog)s --api-config my_api.json          # Use custom API config file
+  %(prog)s -s session/qualgolab_telegram.session -c config.json -vvv    # My favorite run command
+        '''
+    )
+    
+    # Session configuration
+    parser.add_argument(
+        '-s', '--session',
+        default=DEFAULT_SESSION,
+        help=f'Telegram session file path (default: {DEFAULT_SESSION})'
+    )
+    
+    # Message count
+    parser.add_argument(
+        '-m', '--messages',
+        type=int,
+        default=DEFAULT_MESSAGES,
+        help=f'Number of messages to download per channel (default: {DEFAULT_MESSAGES})'
+    )
+    
+    # Logging verbosity
+    parser.add_argument(
+        '-v', '--verbose',
+        action='count',
+        default=0,
+        help='Increase logging verbosity (-v: INFO, -vv: DEBUG, -vvv: ALL)'
+    )
+    
+    # Configuration file
+    parser.add_argument(
+        '-c', '--config',
+        default=DEFAULT_CONFIG,
+        help=f'Path to config.json file (default: {DEFAULT_CONFIG})'
+    )
+    
+    # API configuration file
+    parser.add_argument(
+        '--api-config',
+        default=DEFAULT_API_CONFIG,
+        help=f'Path to API config file with Telegram credentials (default: {DEFAULT_API_CONFIG})'
+    )
+    
+    # File size controls (mutually exclusive)
+    size_group = parser.add_mutually_exclusive_group()
+    size_group.add_argument(
+        '--prevent-big-files',
+        action='store_true',
+        help='Prevent downloading files larger than 1GB'
+    )
+    size_group.add_argument(
+        '--max-file-size',
+        type=str,
+        help='Maximum file size to download (e.g., 500MB, 2GB)'
+    )
+    
+    # Output directory
+    parser.add_argument(
+        '-o', '--output',
+        default=DEFAULT_OUTPUT_DIR,
+        help=f'Download directory (default: {DEFAULT_OUTPUT_DIR})'
+    )
+    
+    # Logs directory
+    parser.add_argument(
+        '--logs-dir',
+        default=DEFAULT_LOGS_DIR,
+        help=f'Logs directory (default: {DEFAULT_LOGS_DIR})'
+    )
+    
+    # Dry run mode
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Show what would be processed without downloading'
+    )
+    
+    # Channel filtering
+    parser.add_argument(
+        '--channels',
+        type=str,
+        help='Comma-separated list of specific channels to process'
+    )
+    
+    parser.add_argument(
+        '--exclude',
+        type=str,
+        help='Comma-separated list of channels to exclude'
+    )
+    
+    # Output file
+    parser.add_argument(
+        '--output-file',
+        default='infostealer_results.json',
+        help='JSON output file for results (default: infostealer_results.json)'
+    )
+    
+    return parser
+
+def validate_arguments(args):
+    """Validate and process command-line arguments."""
+    # Validate session file directory
+    session_dir = os.path.dirname(os.path.abspath(args.session)) if os.path.dirname(args.session) else '.'
+    if not os.path.exists(session_dir):
+        print(f"Error: Session directory does not exist: {session_dir}")
+        sys.exit(1)
+    
+    # Validate config file
+    if not os.path.exists(args.config):
+        print(f"Error: Config file not found: {args.config}")
+        sys.exit(1)
+    
+    # Validate API config file
+    if not os.path.exists(args.api_config):
+        print(f"Error: API config file not found: {args.api_config}")
+        print("Please create an api_config.json file with your Telegram API credentials:")
+        print('{"telegram_api": {"api_id": YOUR_API_ID, "api_hash": "YOUR_API_HASH"}}')
+        sys.exit(1)
+    
+    # Parse and validate file size limits
+    if args.prevent_big_files:
+        args.max_file_size_bytes = DEFAULT_MAX_FILE_SIZE
+    elif args.max_file_size:
+        try:
+            args.max_file_size_bytes = parse_size(args.max_file_size)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+    else:
+        args.max_file_size_bytes = None  # No limit
+    
+    # Validate message count
+    if args.messages < 1:
+        print("Error: Number of messages must be at least 1")
+        sys.exit(1)
+    
+    # Create output directory
+    os.makedirs(args.output, exist_ok=True)
+    
+    # Create logs directory
+    os.makedirs(args.logs_dir, exist_ok=True)
+    
+    # Process channel lists
+    if args.channels:
+        args.channels_list = [ch.strip() for ch in args.channels.split(',') if ch.strip()]
+    else:
+        args.channels_list = None
+    
+    if args.exclude:
+        args.exclude_list = [ch.strip() for ch in args.exclude.split(',') if ch.strip()]
+    else:
+        args.exclude_list = None
+    
+    return args
+
+def setup_dynamic_logging(args):
+    """Setup logging with dynamic verbosity levels."""
+    # Setup base logging
+    logger, compliance_logger, error_logger = setup_logging(args.logs_dir)
+    
+    # Adjust logging levels based on verbosity
+    console_level = logging.WARNING  # Default
+    if args.verbose == 1:
+        console_level = logging.INFO
+    elif args.verbose == 2:
+        console_level = logging.DEBUG
+    elif args.verbose >= 3:
+        console_level = logging.NOTSET  # Show everything
+    
+    # Update console handler levels
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not hasattr(handler, 'baseFilename'):
+            handler.setLevel(console_level)
+    
+    return logger, compliance_logger, error_logger
+
+def sanitize_filename(filename):
+    """Sanitize filename for safe directory creation."""
+    # Remove/replace problematic characters
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    filename = re.sub(r'[\s\[\]{}()]+', '_', filename)
+    filename = filename.strip('._')
+    return filename[:50]  # Limit length
+
+def load_channels_config(config_path, logger, compliance_logger, args):
+    """Load channels from config.json and filter based on arguments."""
+    try:
+        logger.info(f"Loading channels configuration from {config_path}")
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        channels = config.get('channels', [])
+        logger.debug(f"Raw channels loaded: {len(channels)}")
+        
+        # Filter channels with specific parsers (not default)
+        filtered_channels = []
+        for channel in channels:
+            parser = channel.get('parser', '')
+            if parser != 'infostealer_parser/parser_default.py':
+                filtered_channels.append(channel)
+                compliance_logger.info(f"Channel selected for processing: {channel['title']} (ID: {channel['id']}, Parser: {parser})")
+        
+        # Apply command-line channel filters
+        if args.channels_list:
+            # Filter to only specified channels
+            final_channels = []
+            for channel in filtered_channels:
+                if (channel['title'] in args.channels_list or 
+                    channel.get('username') in args.channels_list or
+                    str(channel['id']) in args.channels_list):
+                    final_channels.append(channel)
+            filtered_channels = final_channels
+            logger.info(f"Filtered to specified channels: {len(filtered_channels)}")
+        
+        if args.exclude_list:
+            # Exclude specified channels
+            final_channels = []
+            for channel in filtered_channels:
+                if not (channel['title'] in args.exclude_list or 
+                       channel.get('username') in args.exclude_list or
+                       str(channel['id']) in args.exclude_list):
+                    final_channels.append(channel)
+            excluded_count = len(filtered_channels) - len(final_channels)
+            filtered_channels = final_channels
+            logger.info(f"Excluded {excluded_count} channels")
+        
+        logger.info(f"Loaded {len(channels)} total channels")
+        logger.info(f"Found {len(filtered_channels)} channels with specific parsers after filtering")
+        compliance_logger.info(f"Channel filtering completed: {len(filtered_channels)} channels selected from {len(channels)} total")
+        
+        return filtered_channels
+        
+    except FileNotFoundError:
+        logger.error(f"Config file {config_path} not found")
+        return []
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing config file: {e}")
+        return []
+
+async def store_message_text_standalone(message, channel_info, output_dir, logger, compliance_logger, error_logger):
+    """Store plain message text in channel/date folder structure."""
+    try:
+        # Create channel-specific directory with date folder
+        channel_dir = sanitize_filename(channel_info['title'])
+        date_folder = message.date.strftime('%Y-%m-%d')
+        message_path = os.path.join(output_dir, channel_dir, date_folder)
+        os.makedirs(message_path, exist_ok=True)
+        
+        # Generate message text filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        message_filename = f"{timestamp}_msg_{message.id}_text.json"
+        message_file_path = os.path.join(message_path, message_filename)
+        
+        # Prepare comprehensive message data
+        message_data = {
+            'channel_info': {
+                'title': channel_info['title'],
+                'username': channel_info.get('username'),
+                'id': channel_info['id'],
+                'parser': channel_info.get('parser', '')
+            },
+            'message_id': message.id,
+            'date': message.date.isoformat(),
+            'text': message.text or '',
+            'views': getattr(message, 'views', 0),
+            'forwards': getattr(message, 'forwards', 0),
+            'replies': getattr(message, 'replies', None),
+            'edit_date': message.edit_date.isoformat() if message.edit_date else None,
+            'grouped_id': message.grouped_id,
+            'from_id': str(message.from_id) if message.from_id else None,
+            'via_bot_id': message.via_bot_id,
+            'media_type': type(message.media).__name__ if message.media else None,
+            'has_media': bool(message.media),
+            'media_size': get_media_size(message) if message.media else 0,
+            'collection_time': datetime.now().isoformat(),
+            'folder_structure': f"{channel_dir}/{date_folder}"
+        }
+        
+        # Write message data to JSON file
+        with open(message_file_path, 'w', encoding='utf-8') as f:
+            json.dump(message_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Stored message text: {message_file_path}")
+        compliance_logger.info(f"MESSAGE_TEXT_STANDALONE: File={message_file_path}, MessageID={message.id}, Channel={channel_info['title']}")
+        
+        return message_file_path
+        
+    except Exception as e:
+        logger.error(f"Error storing standalone message text: {e}")
+        error_logger.error(f"MESSAGE_TEXT_STANDALONE_ERROR: {str(e)}, MessageID={message.id}, Channel={channel_info['title']}")
+        return None
+
+async def get_messages_from_channel(client, channel_info, download_manager, args, logger, compliance_logger, error_logger):
+    """Get messages from a specific channel with concurrent downloads."""
+    try:
+        logger.info(f"Getting {args.messages} message(s) from: {channel_info['title']}")
+        compliance_logger.info(f"API_REQUEST: Getting channel entity for ID {channel_info['id']}")
+        
+        # Get channel entity by ID
+        channel_entity = await client.get_entity(channel_info['id'])
+        logger.debug(f"Channel entity retrieved: {channel_entity.title}")
+        
+        # Get messages (limit=args.messages)
+        compliance_logger.info(f"API_REQUEST: Getting messages from channel {channel_info['title']} (limit={args.messages})")
+        messages = await client.get_messages(channel_entity, limit=args.messages)
+        
+        if not messages:
+            logger.warning(f"No messages found in channel: {channel_info['title']}")
+            compliance_logger.warning(f"EMPTY_CHANNEL: No messages found in {channel_info['title']}")
+            return []
+        
+        logger.info(f"Retrieved {len(messages)} message(s) from {channel_info['title']}")
+        
+        processed_messages = []
+        download_ids = []
+        
+        for i, message in enumerate(messages, 1):
+            logger.debug(f"Processing message {i}/{len(messages)}: ID={message.id}, Date={message.date}, HasMedia={bool(message.media)}")
+            
+            # Extract message data
+            message_data = {
+                'channel_info': channel_info,
+                'message_id': message.id,
+                'date': message.date.isoformat(),
+                'text': message.text or '',
+                'media_type': None,
+                'has_media': bool(message.media),
+                'downloaded_files': [],
+                'parser': channel_info.get('parser', '')
+            }
+            
+            compliance_logger.info(f"MESSAGE_COLLECTED: Channel={channel_info['title']}, MessageID={message.id}, Date={message.date}")
+            
+            # Check for media and queue downloads
+            if message.media and not args.dry_run:
+                media_type = type(message.media).__name__
+                message_data['media_type'] = media_type
+                
+                # Get media size before download
+                media_size = get_media_size(message)
+                message_data['media_size'] = media_size
+                message_data['media_size_formatted'] = format_file_size(media_size)
+                
+                logger.info(f"Message has media: {media_type}, Size: {format_file_size(media_size)}")
+                compliance_logger.info(f"MEDIA_DETECTED: Type={media_type}, Size={media_size}, MessageID={message.id}")
+                
+                # Check size limits before queuing download
+                should_skip = False
+                if args.max_file_size_bytes and media_size > args.max_file_size_bytes:
+                    logger.warning(f"File too large ({format_file_size(media_size)}), skipping download")
+                    compliance_logger.warning(f"DOWNLOAD_SKIPPED: File too large - {media_size} bytes > {args.max_file_size_bytes} bytes")
+                    message_data['download_skipped'] = True
+                    message_data['skip_reason'] = f"File too large ({format_file_size(media_size)})"
+                    should_skip = True
+                
+                if not should_skip:
+                    # Add download to queue (non-blocking)
+                    download_id = await download_manager.add_download(
+                        client, message, channel_info, logger, compliance_logger, error_logger, media_size
+                    )
+                    download_ids.append(download_id)
+                    message_data['download_ids'] = [download_id]  # Temporary field to track downloads
+                    
+                    logger.info(f"Download queued: {download_id} ({format_file_size(media_size)})")
+                    compliance_logger.info(f"DOWNLOAD_QUEUED: ID={download_id}, Size={media_size}, MessageID={message.id}")
+            elif message.media and args.dry_run:
+                # In dry run mode, just show what would be downloaded
+                media_type = type(message.media).__name__
+                media_size = get_media_size(message)
+                message_data['media_type'] = media_type
+                message_data['media_size'] = media_size
+                message_data['media_size_formatted'] = format_file_size(media_size)
+                logger.info(f"[DRY RUN] Would download: {media_type}, Size: {format_file_size(media_size)}")
+            else:
+                # For messages without media, still store the message text
+                if not args.dry_run:
+                    logger.info("Message has no media, storing message text only")
+                    message_text_path = await store_message_text_standalone(
+                        message, channel_info, args.output, logger, compliance_logger, error_logger
+                    )
+                    if message_text_path:
+                        message_data['message_text_path'] = message_text_path
+                        compliance_logger.info(f"TEXT_ONLY_MESSAGE_STORED: Path={message_text_path}, MessageID={message.id}")
+                else:
+                    logger.info("[DRY RUN] Would store text-only message")
+            
+            processed_messages.append(message_data)
+        
+        return processed_messages, download_ids
+        
+    except ChannelPrivateError:
+        logger.error(f"Channel is private: {channel_info['title']}")
+        error_logger.error(f"PRIVATE_CHANNEL_ERROR: {channel_info['title']} (ID: {channel_info['id']})")
+        compliance_logger.error(f"ACCESS_DENIED: Channel {channel_info['title']} is private")
+        return [], []
+    except FloodWaitError as e:
+        logger.warning(f"Rate limited, waiting {e.seconds} seconds...")
+        compliance_logger.warning(f"RATE_LIMIT: Waiting {e.seconds} seconds for channel {channel_info['title']}")
+        await asyncio.sleep(e.seconds)
+        return await get_messages_from_channel(client, channel_info, download_manager, args, logger, compliance_logger, error_logger)
+    except Exception as e:
+        logger.error(f"Error processing channel {channel_info['title']}: {e}")
+        error_logger.error(f"CHANNEL_ERROR: {channel_info['title']} - {str(e)}")
+        return [], []
+
+async def main_process(args):
+    """Main processing function."""
+    # Setup logging
+    logger, compliance_logger, error_logger = setup_dynamic_logging(args)
+    
+    logger.info("=== EntroSpies Infostealer Bot Started ===")
+    compliance_logger.info("SESSION_START: Infostealer bot session initiated")
+    
+    if args.dry_run:
+        logger.info("🔍 DRY RUN MODE: No files will be downloaded")
+    
+    # Log configuration
+    logger.info(f"Configuration: Session={args.session}, Messages={args.messages}, Output={args.output}")
+    if args.max_file_size_bytes:
+        logger.info(f"File size limit: {format_file_size(args.max_file_size_bytes)}")
+    
+    # Load API credentials
+    api_id, api_hash = load_api_credentials(args.api_config)
+    logger.info(f"Loaded API credentials from: {args.api_config}")
+    compliance_logger.info(f"API_CONFIG: Loaded credentials from {args.api_config}")
+    
+    # Load channels configuration
+    channels = load_channels_config(args.config, logger, compliance_logger, args)
+    if not channels:
+        logger.error("No channels with specific parsers found")
+        return
+    
+    # Create the client
+    client = TelegramClient(args.session, api_id, api_hash)
+    
+    try:
+        logger.info("Starting Telegram client...")
+        compliance_logger.info("TELEGRAM_CONNECTION: Initiating client connection")
+        await client.start()
+        
+        # Check if we're connected
+        if not await client.is_user_authorized():
+            logger.error("Not authorized. Please check your credentials.")
+            error_logger.error("AUTHORIZATION_FAILED: Client not authorized")
+            return
+            
+        logger.info("Successfully connected to Telegram!")
+        
+        # Get current user info
+        me = await client.get_me()
+        logger.info(f"Logged in as: {me.first_name} {me.last_name or ''} (@{me.username or 'no username'})")
+        compliance_logger.info(f"USER_SESSION: UserID={me.id}, Username={me.username}, Phone={me.phone}")
+        
+        # Initialize download manager for concurrent downloads
+        download_manager = DownloadManager(download_dir=args.output)
+        download_workers = await download_manager.start_workers()
+        
+        logger.info(f"Started {len(download_workers)} download workers")
+        compliance_logger.info(f"DOWNLOAD_MANAGER: Started {len(download_workers)} concurrent workers")
+        
+        # Collect messages from each channel
+        all_collected_messages = []
+        all_download_ids = []
+        
+        try:
+            for i, channel in enumerate(channels, 1):
+                logger.info(f"Processing channel {i}/{len(channels)}: {channel['title']}")
+                compliance_logger.info(f"CHANNEL_PROCESSING: {i}/{len(channels)} - {channel['title']} (ID: {channel['id']})")
+                
+                messages, download_ids = await get_messages_from_channel(
+                    client, channel, download_manager, args, logger, compliance_logger, error_logger
+                )
+                
+                if messages:
+                    all_collected_messages.extend(messages)
+                    all_download_ids.extend(download_ids)
+                
+                # Rate limiting compliance (1 second between requests)
+                if i < len(channels):
+                    logger.debug("Rate limiting delay...")
+                    compliance_logger.info("RATE_LIMIT_DELAY: 1 second delay enforced")
+                    await asyncio.sleep(1)
+            
+            # Wait for all downloads to complete
+            if all_download_ids and not args.dry_run:
+                logger.info(f"Waiting for {len(all_download_ids)} downloads to complete...")
+                compliance_logger.info(f"DOWNLOAD_WAIT: Waiting for {len(all_download_ids)} downloads")
+                
+                # Start progress monitoring
+                print(f"\n📥 Starting {len(all_download_ids)} downloads with progress monitoring...")
+                download_manager.start_progress_monitoring(len(all_download_ids))
+                
+                await download_manager.wait_for_downloads()
+                
+                # Ensure progress monitor is stopped
+                download_manager.progress_monitor.stop_monitoring()
+                print("✅ All downloads completed!")
+                
+                # Update message data with download results
+                for message_data in all_collected_messages:
+                    if message_data.get('download_ids'):
+                        downloaded_files = []
+                        for download_id in message_data['download_ids']:
+                            result = download_manager.download_results.get(download_id)
+                            if result:
+                                downloaded_files.append(result)
+                        message_data['downloaded_files'] = downloaded_files
+                        del message_data['download_ids']  # Remove temporary field
+        
+        finally:
+            # Shutdown download manager
+            await download_manager.shutdown(download_workers)
+            logger.info("Download manager shutdown completed")
+        
+        # Save results to JSON
+        output_data = {
+            'timestamp': datetime.now().isoformat(),
+            'configuration': {
+                'session': args.session,
+                'messages_per_channel': args.messages,
+                'max_file_size': args.max_file_size_bytes,
+                'dry_run': args.dry_run,
+                'channels_filter': args.channels_list,
+                'exclude_filter': args.exclude_list
+            },
+            'total_channels_processed': len(channels),
+            'total_messages_collected': len(all_collected_messages),
+            'messages': all_collected_messages
+        }
+        
+        if not args.dry_run:
+            try:
+                with open(args.output_file, 'w', encoding='utf-8') as f:
+                    json.dump(output_data, f, indent=2, ensure_ascii=False)
+                logger.info(f"Results saved to {args.output_file}")
+                compliance_logger.info(f"OUTPUT_SAVED: {args.output_file} - {len(all_collected_messages)} messages")
+            except Exception as e:
+                logger.error(f"Error saving results: {e}")
+                error_logger.error(f"OUTPUT_ERROR: Failed to save {args.output_file} - {str(e)}")
+        else:
+            logger.info(f"[DRY RUN] Would save results to {args.output_file}")
+        
+        # Summary
+        downloads_count = sum(len(msg.get('downloaded_files', [])) for msg in all_collected_messages)
+        logger.info(f"Summary: Channels processed: {len(channels)}, Messages collected: {len(all_collected_messages)}, Downloads completed: {downloads_count}")
+        compliance_logger.info(f"SESSION_SUMMARY: Processed={len(channels)}, Collected={len(all_collected_messages)}, Downloaded={downloads_count}")
+        
+    except SessionPasswordNeededError:
+        logger.warning("Two-factor authentication is enabled. Please enter your password:")
+        compliance_logger.warning("2FA_REQUIRED: Two-factor authentication needed")
+        password = input("Password: ")
+        await client.sign_in(password=password)
+        logger.info("Successfully authenticated with 2FA!")
+        compliance_logger.info("2FA_SUCCESS: Two-factor authentication completed")
+        
+    except Exception as e:
+        logger.error(f"Error occurred: {e}")
+        error_logger.error(f"CRITICAL_ERROR: {type(e).__name__} - {str(e)}")
+        
+    finally:
+        await client.disconnect()
+        logger.info("Disconnected from Telegram")
+        compliance_logger.info("SESSION_END: Infostealer bot session completed")
+        logger.info("=== EntroSpies Infostealer Bot Finished ===")
+
+def main():
+    """Main entry point."""
+    # Parse command-line arguments
+    parser = setup_argument_parser()
+    args = parser.parse_args()
+    
+    # Validate arguments
+    args = validate_arguments(args)
+    
+    try:
+        asyncio.run(main_process(args))
+    except KeyboardInterrupt:
+        print("\n⚠️  Operation cancelled by user")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
