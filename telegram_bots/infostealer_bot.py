@@ -295,7 +295,7 @@ def load_channels_config(config_path, logger, compliance_logger, args):
         filtered_channels = []
         for channel in channels:
             parser = channel.get('parser', '')
-            if parser != 'infostealer_parser/parser_default.py':
+            if parser != 'infostealer_parser/_default.py':
                 filtered_channels.append(channel)
                 compliance_logger.info(f"Channel selected for processing: {channel['title']} (ID: {channel['id']}, Parser: {parser})")
         
