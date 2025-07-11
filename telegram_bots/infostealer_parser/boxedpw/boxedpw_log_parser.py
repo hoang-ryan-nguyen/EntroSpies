@@ -12,6 +12,7 @@ import csv
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
+from parsing_failure_logger import ParsingFailureLogger
 
 
 class BoxedPwLogParser:
@@ -20,16 +21,19 @@ class BoxedPwLogParser:
     Handles various log formats including JSON, CSV, and text files.
     """
     
-    def __init__(self, logger: Optional[logging.Logger] = None, max_file_size: int = None):
+    def __init__(self, logger: Optional[logging.Logger] = None, max_file_size: int = None,
+                 failure_logger: Optional[ParsingFailureLogger] = None):
         """
         Initialize the boxed.pw log parser.
         
         Args:
             logger: Optional logger instance
             max_file_size: Maximum file size to process (defaults to 100MB)
+            failure_logger: Optional failure logger for tracking parsing failures
         """
         self.logger = logger or logging.getLogger(__name__)
         self.max_file_size = max_file_size or int(os.getenv('MAX_EXTRACTION_SIZE', 100 * 1024 * 1024))
+        self.failure_logger = failure_logger
         
         # File type patterns for log identification
         self.log_extensions = {'.txt', '.log', '.csv', '.json'}
@@ -74,12 +78,16 @@ class BoxedPwLogParser:
         
         return log_files
     
-    def parse_single_log_file(self, log_file: Path) -> Dict[str, Any]:
+    def parse_single_log_file(self, log_file: Path, message_file_path: Optional[str] = None,
+                             channel_name: Optional[str] = None, message_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Parse a single log file for credentials.
         
         Args:
             log_file: Path to log file
+            message_file_path: Path to message file (for failure logging)
+            channel_name: Channel name (for failure logging)
+            message_id: Message ID (for failure logging)
             
         Returns:
             Dictionary with parsing results
@@ -95,6 +103,16 @@ class BoxedPwLogParser:
         
         try:
             if not log_file.exists():
+                # Log file access failure
+                if self.failure_logger and message_file_path:
+                    self.failure_logger.log_log_parsing_failure(
+                        message_file_path=message_file_path,
+                        log_file_path=log_file,
+                        parser_name="boxedpw_log_parser",
+                        error_message="Log file not found",
+                        channel_name=channel_name,
+                        message_id=message_id
+                    )
                 return result
             
             result['file_size'] = log_file.stat().st_size
@@ -102,6 +120,15 @@ class BoxedPwLogParser:
             # Skip very large files
             if result['file_size'] > self.max_file_size:
                 self.logger.warning(f"Skipping large file: {log_file} ({result['file_size']} bytes)")
+                # Log as unsupported format (too large)
+                if self.failure_logger and message_file_path:
+                    self.failure_logger.log_format_unsupported_failure(
+                        message_file_path=message_file_path,
+                        file_path=log_file,
+                        file_format=f"large_file_{result['file_size']}_bytes",
+                        channel_name=channel_name,
+                        message_id=message_id
+                    )
                 return result
             
             # Determine file type and parse accordingly
@@ -121,19 +148,46 @@ class BoxedPwLogParser:
             
             if result['credentials_count'] > 0:
                 self.logger.info(f"Found {result['credentials_count']} credentials in {log_file}")
+            else:
+                # Log parsing failure if no credentials found
+                if self.failure_logger and message_file_path:
+                    self.failure_logger.log_log_parsing_failure(
+                        message_file_path=message_file_path,
+                        log_file_path=log_file,
+                        parser_name="boxedpw_log_parser",
+                        error_message="No credentials found in log file",
+                        channel_name=channel_name,
+                        message_id=message_id
+                    )
             
         except Exception as e:
             self.logger.error(f"Error parsing log file {log_file}: {e}")
+            
+            # Log parsing failure
+            if self.failure_logger and message_file_path:
+                self.failure_logger.log_log_parsing_failure(
+                    message_file_path=message_file_path,
+                    log_file_path=log_file,
+                    parser_name="boxedpw_log_parser",
+                    error_message=str(e),
+                    channel_name=channel_name,
+                    message_id=message_id
+                )
         
         return result
     
-    def parse_extracted_logs(self, extract_dir: Path, extracted_files: List[str]) -> Dict[str, Any]:
+    def parse_extracted_logs(self, extract_dir: Path, extracted_files: List[str],
+                            message_file_path: Optional[str] = None, channel_name: Optional[str] = None,
+                            message_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Parse all extracted log files for credentials and useful information.
         
         Args:
             extract_dir: Directory containing extracted files
             extracted_files: List of extracted file paths
+            message_file_path: Path to message file (for failure logging)
+            channel_name: Channel name (for failure logging)
+            message_id: Message ID (for failure logging)
             
         Returns:
             Dictionary with comprehensive parsing results
@@ -166,7 +220,7 @@ class BoxedPwLogParser:
                 # Parse each log file
                 for log_file in log_files:
                     try:
-                        log_result = self.parse_single_log_file(log_file)
+                        log_result = self.parse_single_log_file(log_file, message_file_path, channel_name, message_id)
                         parsing_result['credentials_found'] += log_result.get('credentials_count', 0)
                         parsing_result['parsed_files'].append(log_result)
                     except Exception as e:

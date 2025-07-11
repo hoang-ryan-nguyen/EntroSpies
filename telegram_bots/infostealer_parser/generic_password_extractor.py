@@ -11,6 +11,7 @@ import logging
 import os
 from typing import Optional, List, Dict, Union
 from pathlib import Path
+from parsing_failure_logger import ParsingFailureLogger
 
 class GenericPasswordExtractor:
     """
@@ -20,7 +21,8 @@ class GenericPasswordExtractor:
     
     def __init__(self, logger: Optional[logging.Logger] = None, 
                  patterns_file: Optional[str] = None, 
-                 channel_name: Optional[str] = None):
+                 channel_name: Optional[str] = None,
+                 failure_logger: Optional[ParsingFailureLogger] = None):
         """
         Initialize the password extractor with patterns from JSON file.
         
@@ -28,9 +30,11 @@ class GenericPasswordExtractor:
             logger: Optional logger instance for debugging
             patterns_file: Path to JSON file containing password patterns
             channel_name: Name of the channel for pattern optimization (e.g., 'boxed.pw', 'redline')
+            failure_logger: Optional failure logger for tracking parsing failures
         """
         self.logger = logger or logging.getLogger(__name__)
         self.channel_name = channel_name or 'generic'
+        self.failure_logger = failure_logger
         
         # Default patterns file location
         if patterns_file is None:
@@ -145,12 +149,16 @@ class GenericPasswordExtractor:
             'false_positives': ['password', 'pass', '123456', 'admin', 'user', 'test']
         }
     
-    def extract_password(self, message_text: str) -> Optional[str]:
+    def extract_password(self, message_text: str, message_file_path: Optional[str] = None,
+                        channel_name: Optional[str] = None, message_id: Optional[int] = None) -> Optional[str]:
         """
         Extract password from message text using configured patterns.
         
         Args:
             message_text: The message text to analyze
+            message_file_path: Path to the message file (for failure logging)
+            channel_name: Channel name (for failure logging)
+            message_id: Message ID (for failure logging)
             
         Returns:
             Extracted password string or None if no password found
@@ -160,11 +168,14 @@ class GenericPasswordExtractor:
         
         self.logger.debug(f"Analyzing message text for passwords: {message_text[:100]}...")
         
+        patterns_tried = []
+        
         # Try each pattern in order of priority
         for pattern_info in self.password_patterns:
             pattern = pattern_info['pattern']
             flags = pattern_info['compiled_flags']
             name = pattern_info['name']
+            patterns_tried.append(name)
             
             try:
                 matches = re.findall(pattern, message_text, flags)
@@ -180,6 +191,17 @@ class GenericPasswordExtractor:
                 self.logger.error(f"Error applying pattern '{name}': {e}")
         
         self.logger.debug("No valid password found in message text")
+        
+        # Log parsing failure if failure logger is available
+        if self.failure_logger and message_file_path:
+            self.failure_logger.log_password_extraction_failure(
+                message_file_path=message_file_path,
+                message_text=message_text,
+                channel_name=channel_name or self.channel_name,
+                message_id=message_id,
+                patterns_tried=patterns_tried
+            )
+        
         return None
     
     def extract_passwords_batch(self, message_texts: List[str]) -> List[Optional[str]]:
@@ -215,22 +237,61 @@ class GenericPasswordExtractor:
                 message_text = message_data.get('message', '') or message_data.get('content', '')
             
             if message_text:
-                password = self.extract_password(message_text)
+                # Extract additional info for failure logging
+                channel_name = message_data.get('channel', self.channel_name)
+                message_id = message_data.get('message_id', 0)
+                
+                password = self.extract_password(
+                    message_text=message_text,
+                    message_file_path=str(json_file_path),
+                    channel_name=channel_name,
+                    message_id=message_id
+                )
                 if password:
                     self.logger.info(f"Password extracted from {json_file_path}: {password}")
                 return password
             else:
                 self.logger.warning(f"No text content found in {json_file_path}")
+                # Log as a file access failure
+                if self.failure_logger:
+                    self.failure_logger.log_failure(
+                        message_file_path=str(json_file_path),
+                        failure_category='FILE_ACCESS',
+                        failure_reason='No text content found in JSON file',
+                        channel_name=message_data.get('channel', self.channel_name),
+                        message_id=message_data.get('message_id', 0)
+                    )
                 return None
                 
         except FileNotFoundError:
             self.logger.error(f"JSON file not found: {json_file_path}")
+            if self.failure_logger:
+                self.failure_logger.log_failure(
+                    message_file_path=str(json_file_path),
+                    failure_category='FILE_ACCESS',
+                    failure_reason='JSON file not found',
+                    error_details={'error': 'FileNotFoundError'}
+                )
             return None
         except json.JSONDecodeError as e:
             self.logger.error(f"Invalid JSON in file {json_file_path}: {e}")
+            if self.failure_logger:
+                self.failure_logger.log_failure(
+                    message_file_path=str(json_file_path),
+                    failure_category='FORMAT_UNSUPPORTED',
+                    failure_reason='Invalid JSON format',
+                    error_details={'error': str(e)}
+                )
             return None
         except Exception as e:
             self.logger.error(f"Error reading JSON file {json_file_path}: {e}")
+            if self.failure_logger:
+                self.failure_logger.log_failure(
+                    message_file_path=str(json_file_path),
+                    failure_category='FILE_ACCESS',
+                    failure_reason='Error reading JSON file',
+                    error_details={'error': str(e)}
+                )
             return None
     
     def _clean_password(self, password: str) -> str:
@@ -367,18 +428,20 @@ class GenericPasswordExtractor:
         self.logger.info(f"Reloaded {len(self.password_patterns)} patterns")
     
     @staticmethod
-    def create_for_channel(channel_name: str, logger: Optional[logging.Logger] = None) -> 'GenericPasswordExtractor':
+    def create_for_channel(channel_name: str, logger: Optional[logging.Logger] = None,
+                          failure_logger: Optional[ParsingFailureLogger] = None) -> 'GenericPasswordExtractor':
         """
         Factory method to create a password extractor optimized for a specific channel.
         
         Args:
             channel_name: Name of the channel (e.g., 'boxed.pw', 'redline', 'raccoon')
             logger: Optional logger instance
+            failure_logger: Optional failure logger for tracking parsing failures
             
         Returns:
             GenericPasswordExtractor instance optimized for the channel
         """
-        return GenericPasswordExtractor(logger=logger, channel_name=channel_name)
+        return GenericPasswordExtractor(logger=logger, channel_name=channel_name, failure_logger=failure_logger)
 
 
 def main():

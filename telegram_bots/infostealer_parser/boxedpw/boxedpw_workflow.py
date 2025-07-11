@@ -18,6 +18,12 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 try:
+    from parsing_failure_logger import ParsingFailureLogger
+except ImportError:
+    # Try importing from project root
+    from parsing_failure_logger import ParsingFailureLogger
+
+try:
     from boxedpw_password_extractor import PasswordExtractor
     from boxedpw_log_parser import BoxedPwLogParser
 except ImportError:
@@ -48,15 +54,18 @@ class BoxedPwWorkflow:
     Handles password extraction, archive decompression, and log parsing.
     """
     
-    def __init__(self, base_download_dir: str = None, logger: Optional[logging.Logger] = None):
+    def __init__(self, base_download_dir: str = None, logger: Optional[logging.Logger] = None,
+                 failure_logger: Optional[ParsingFailureLogger] = None):
         """
         Initialize the boxed.pw workflow processor.
         
         Args:
             base_download_dir: Base directory for downloads (defaults to ../download)
             logger: Optional logger instance
+            failure_logger: Optional failure logger for tracking parsing failures
         """
         self.logger = logger or logging.getLogger(__name__)
+        self.failure_logger = failure_logger
         
         # Set base download directory
         if base_download_dir is None:
@@ -76,10 +85,10 @@ class BoxedPwWorkflow:
             'max_extraction_size': int(os.getenv('MAX_EXTRACTION_SIZE', 100 * 1024 * 1024)),  # 100MB limit
         }
         
-        # Initialize components
+        # Initialize components with failure logger
         self.password_extractor = PasswordExtractor(self.logger)
-        self.archive_decompressor = ArchiveDecompressor(logger=self.logger)
-        self.log_parser = BoxedPwLogParser(logger=self.logger, max_file_size=self.config.get('max_extraction_size'))
+        self.archive_decompressor = ArchiveDecompressor(logger=self.logger, failure_logger=self.failure_logger)
+        self.log_parser = BoxedPwLogParser(logger=self.logger, max_file_size=self.config.get('max_extraction_size'), failure_logger=self.failure_logger)
         self.elasticsearch_client = InfostealerElasticsearchClient(
             logger=self.logger,
             parser_version='boxedpw-1.0'
@@ -143,12 +152,33 @@ class BoxedPwWorkflow:
             else:
                 result['warnings'].append("No password found in password.json")
                 self.logger.warning(f"No password found in password.json for message {message_id}")
+                
+                # Log workflow failure for missing password
+                if self.failure_logger:
+                    self.failure_logger.log_workflow_failure(
+                        message_file_path=str(message_json_path),
+                        workflow_step="password_extraction",
+                        error_message="No password found in password.json file",
+                        channel_name=".boxed.pw",
+                        message_id=message_id
+                    )
             
             # Step 2: Find downloaded archive file in message folder
             archive_file = self._find_archive_file(download_path, message_id)
             if not archive_file:
                 result['errors'].append("No archive file found in message folder")
                 self.logger.error(f"No archive file found in message folder for message {message_id}")
+                
+                # Log workflow failure for missing archive file
+                if self.failure_logger:
+                    self.failure_logger.log_workflow_failure(
+                        message_file_path=str(message_json_path),
+                        workflow_step="archive_file_discovery",
+                        error_message="No archive file found in message folder",
+                        channel_name=".boxed.pw",
+                        message_id=message_id
+                    )
+                
                 return result
             
             # Step 2.1: Validate message-file pairing
@@ -171,13 +201,19 @@ class BoxedPwWorkflow:
                     self.logger.warning("Failed to save password to JSON file, continuing with memory-only approach")
             
             # Step 3: Extract archive
-            extraction_result = self._extract_archive(archive_file, password, result, password_json_path)
+            extraction_result = self._extract_archive(archive_file, password, result, password_json_path,
+                                                     message_file_path=str(message_json_path),
+                                                     channel_name=".boxed.pw",
+                                                     message_id=message_id)
             
             # Step 4: Parse extracted logs if extraction successful
             if extraction_result['success']:
                 log_parsing_result = self.log_parser.parse_extracted_logs(
                     extraction_result['extract_dir'],
-                    extraction_result['extracted_files']
+                    extraction_result['extracted_files'],
+                    message_file_path=str(message_json_path),
+                    channel_name=".boxed.pw",
+                    message_id=message_id
                 )
                 result['log_parsing_results'] = log_parsing_result
             
@@ -230,6 +266,16 @@ class BoxedPwWorkflow:
         except Exception as e:
             self.logger.error(f"Error processing boxed.pw download: {e}")
             result['errors'].append(f"Processing error: {str(e)}")
+            
+            # Log general workflow failure
+            if self.failure_logger:
+                self.failure_logger.log_workflow_failure(
+                    message_file_path=str(message_json_path) if 'message_json_path' in locals() else "unknown",
+                    workflow_step="general_processing",
+                    error_message=str(e),
+                    channel_name=".boxed.pw",
+                    message_id=message_id
+                )
         
         finally:
             result['processing_time'] = time.time() - start_time
@@ -371,7 +417,9 @@ class BoxedPwWorkflow:
             return False
     
     def _extract_archive(self, archive_file: Path, password: Optional[str], 
-                        result: Dict[str, Any], password_json_path: Optional[Path] = None) -> Dict[str, Any]:
+                        result: Dict[str, Any], password_json_path: Optional[Path] = None,
+                        message_file_path: Optional[str] = None, channel_name: Optional[str] = None,
+                        message_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Extract archive file using password.
         Reads password from JSON file first if available, falls back to memory password.
@@ -413,7 +461,10 @@ class BoxedPwWorkflow:
                     archive_file, 
                     extract_dir.parent,
                     password=active_password,
-                    create_subfolder=True
+                    create_subfolder=True,
+                    message_file_path=message_file_path,
+                    channel_name=channel_name,
+                    message_id=message_id
                 )
                 
                 if success:

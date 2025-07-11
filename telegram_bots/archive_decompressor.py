@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Union, Tuple
 import shutil
 import time
+from parsing_failure_logger import ParsingFailureLogger
 
 class ArchiveDecompressor:
     """
@@ -19,15 +20,18 @@ class ArchiveDecompressor:
     Supports multiple archive formats including RAR, ZIP, TAR, TAR.GZ, 7Z, etc.
     """
     
-    def __init__(self, sevenzip_path: str = None, logger: Optional[logging.Logger] = None):
+    def __init__(self, sevenzip_path: str = None, logger: Optional[logging.Logger] = None,
+                 failure_logger: Optional[ParsingFailureLogger] = None):
         """
         Initialize the archive decompressor.
         
         Args:
             sevenzip_path: Path to 7z binary (defaults to bin/7zz)
             logger: Optional logger instance for debugging
+            failure_logger: Optional failure logger for tracking parsing failures
         """
         self.logger = logger or logging.getLogger(__name__)
+        self.failure_logger = failure_logger
         
         # Default 7z binary path
         if sevenzip_path is None:
@@ -177,7 +181,10 @@ class ArchiveDecompressor:
                        extract_to: Union[str, Path], 
                        password: Optional[str] = None,
                        overwrite: bool = True,
-                       create_subfolder: bool = True) -> Tuple[bool, List[str]]:
+                       create_subfolder: bool = True,
+                       message_file_path: Optional[str] = None,
+                       channel_name: Optional[str] = None,
+                       message_id: Optional[int] = None) -> Tuple[bool, List[str]]:
         """
         Extract an archive to a specified directory.
         
@@ -187,6 +194,9 @@ class ArchiveDecompressor:
             password: Optional password for encrypted archives
             overwrite: Whether to overwrite existing files
             create_subfolder: Whether to create a subfolder with archive name
+            message_file_path: Path to message file (for failure logging)
+            channel_name: Channel name (for failure logging)
+            message_id: Message ID (for failure logging)
             
         Returns:
             Tuple of (success: bool, extracted_files: List[str])
@@ -250,13 +260,49 @@ class ArchiveDecompressor:
             else:
                 self.logger.error(f"Extraction failed with return code {result.returncode}")
                 self.logger.error(f"Error output: {result.stderr}")
+                
+                # Log extraction failure
+                if self.failure_logger and message_file_path:
+                    self.failure_logger.log_archive_decompression_failure(
+                        message_file_path=message_file_path,
+                        archive_path=archive_path,
+                        password_used=password,
+                        error_message=result.stderr,
+                        channel_name=channel_name,
+                        message_id=message_id
+                    )
+                
                 return False, []
                 
         except subprocess.TimeoutExpired:
             self.logger.error(f"Extraction timeout for archive: {archive_path}")
+            
+            # Log timeout failure
+            if self.failure_logger and message_file_path:
+                self.failure_logger.log_archive_decompression_failure(
+                    message_file_path=message_file_path,
+                    archive_path=archive_path,
+                    password_used=password,
+                    error_message="Extraction timeout",
+                    channel_name=channel_name,
+                    message_id=message_id
+                )
+            
             return False, []
         except Exception as e:
             self.logger.error(f"Error during extraction: {e}")
+            
+            # Log general extraction failure
+            if self.failure_logger and message_file_path:
+                self.failure_logger.log_archive_decompression_failure(
+                    message_file_path=message_file_path,
+                    archive_path=archive_path,
+                    password_used=password,
+                    error_message=str(e),
+                    channel_name=channel_name,
+                    message_id=message_id
+                )
+            
             return False, []
     
     def test_archive(self, archive_path: Union[str, Path], password: Optional[str] = None) -> bool:
@@ -310,7 +356,10 @@ class ArchiveDecompressor:
     def extract_with_password_list(self, archive_path: Union[str, Path], 
                                   extract_to: Union[str, Path],
                                   password_list: List[str],
-                                  max_attempts: int = 10) -> Tuple[bool, Optional[str], List[str]]:
+                                  max_attempts: int = 10,
+                                  message_file_path: Optional[str] = None,
+                                  channel_name: Optional[str] = None,
+                                  message_id: Optional[int] = None) -> Tuple[bool, Optional[str], List[str]]:
         """
         Try to extract archive using a list of passwords.
         
@@ -319,6 +368,9 @@ class ArchiveDecompressor:
             extract_to: Directory to extract files to
             password_list: List of passwords to try
             max_attempts: Maximum number of password attempts
+            message_file_path: Path to message file (for failure logging)
+            channel_name: Channel name (for failure logging)
+            message_id: Message ID (for failure logging)
             
         Returns:
             Tuple of (success: bool, successful_password: Optional[str], extracted_files: List[str])
@@ -330,7 +382,10 @@ class ArchiveDecompressor:
         
         if not password_list:
             self.logger.warning("No passwords provided, trying without password")
-            success, files = self.extract_archive(archive_path, extract_to, None)
+            success, files = self.extract_archive(archive_path, extract_to, None, 
+                                                message_file_path=message_file_path,
+                                                channel_name=channel_name,
+                                                message_id=message_id)
             return success, None, files
         
         attempts = min(len(password_list), max_attempts)
@@ -339,7 +394,10 @@ class ArchiveDecompressor:
             self.logger.info(f"Trying password {i+1}/{attempts}: {password[:3]}***")
             
             try:
-                success, files = self.extract_archive(archive_path, extract_to, password)
+                success, files = self.extract_archive(archive_path, extract_to, password,
+                                                    message_file_path=message_file_path,
+                                                    channel_name=channel_name,
+                                                    message_id=message_id)
                 
                 if success:
                     self.logger.info(f"Successfully extracted with password: {password}")
@@ -352,6 +410,18 @@ class ArchiveDecompressor:
                 continue
         
         self.logger.warning(f"Failed to extract archive with {attempts} password attempts")
+        
+        # Log final failure after all password attempts
+        if self.failure_logger and message_file_path:
+            self.failure_logger.log_archive_decompression_failure(
+                message_file_path=message_file_path,
+                archive_path=archive_path,
+                password_used=f"Tried {attempts} passwords",
+                error_message=f"All {attempts} password attempts failed",
+                channel_name=channel_name,
+                message_id=message_id
+            )
+        
         return False, None, []
     
     def get_archive_info(self, archive_path: Union[str, Path]) -> Dict[str, Union[str, int, bool]]:
