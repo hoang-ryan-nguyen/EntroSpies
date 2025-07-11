@@ -23,7 +23,7 @@ from master_workflow_orchestrator import MasterWorkflowOrchestrator
 
 # Default configuration
 DEFAULT_SESSION = os.getenv('SESSION_NAME', 'entrospies_session')
-DEFAULT_CONFIG = os.getenv('CONFIG_FILE', 'config.json')
+DEFAULT_CONFIG = os.getenv('CONFIG_FILE', 'config/channel_list.json')
 DEFAULT_API_CONFIG = os.getenv('API_CONFIG_FILE', 'api_config.json')
 DEFAULT_OUTPUT_DIR = os.getenv('DOWNLOAD_DIR', 'download')
 DEFAULT_LOGS_DIR = os.getenv('LOGS_DIR', 'logs')
@@ -120,11 +120,11 @@ Examples:
   %(prog)s                                    # Basic usage with defaults
   %(prog)s -s my_session -v                  # Custom session with verbose logging
   %(prog)s -m 10 --prevent-big-files         # Download 10 messages, skip large files
-  %(prog)s -c custom.json --max-file-size 500MB  # Custom config with 500MB limit
+  %(prog)s -c config/custom_channels.json --max-file-size 500MB  # Custom config with 500MB limit
   %(prog)s --dry-run -vvv                    # Preview mode with maximum verbosity
   %(prog)s --channels "channel1,channel2"    # Process specific channels only
   %(prog)s --api-config my_api.json          # Use custom API config file
-  %(prog)s -s session/qualgolab_telegram.session -c config.json -vvv    # My favorite run command
+  %(prog)s -s session/qualgolab_telegram.session -c config/channel_list.json -vvv    # My favorite run command
         '''
     )
     
@@ -155,7 +155,7 @@ Examples:
     parser.add_argument(
         '-c', '--config',
         default=DEFAULT_CONFIG,
-        help=f'Path to config.json file (default: {DEFAULT_CONFIG})'
+        help=f'Path to channel list file (default: {DEFAULT_CONFIG})'
     )
     
     # API configuration file
@@ -267,7 +267,7 @@ def validate_arguments(args):
     
     # Validate config file
     if not os.path.exists(args.config):
-        print(f"Error: Config file not found: {args.config}")
+        print(f"Error: Channel list file not found: {args.config}")
         sys.exit(1)
     
     # Validate API config file
@@ -430,7 +430,7 @@ def get_download_status(channel_info, message_id, download_dir):
         return "Error checking status"
 
 def load_channels_config(config_path, logger, compliance_logger, args):
-    """Load channels from config.json and filter based on arguments."""
+    """Load channels from channel list file and filter based on arguments."""
     try:
         logger.info(f"Loading channels configuration from {config_path}")
         with open(config_path, 'r', encoding='utf-8') as f:

@@ -54,9 +54,9 @@ ENV TZ=UTC
 HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
     CMD python3 -c "import os; import sys; sys.exit(0 if os.path.exists('/app/telegram_bots/logs/message_collector.log') else 1)" || exit 1
 
-# Default command with proper session and config
+# Default command with proper session and API config
 CMD ["python3", "telegram_bots/infostealer_bot.py", \
      "-s", "session/qualgolab_telegram.session", \
-     "-c", "config.json", \
      "--api-config", "api_config.json", \
+     "-c", "config/channel_list.json", \
      "-v"]

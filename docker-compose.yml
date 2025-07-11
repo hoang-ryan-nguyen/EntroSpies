@@ -20,7 +20,6 @@ services:
     volumes:
       # Configuration files (read-only)
       - ./telegram_bots/api_config.json:/app/telegram_bots/api_config.json:ro
-      - ./telegram_bots/config.json:/app/telegram_bots/config.json:ro
       
       # Persistent data directories (read-write)
       - ./telegram_bots/download:/app/telegram_bots/download

@@ -18,8 +18,7 @@ Before deployment, ensure these files exist and are configured:
 
 #### Configuration Files:
 - `telegram_bots/api_config.json` - Telegram API credentials
-- `telegram_bots/config.json` - Channel configuration
-- `.env` - Environment variables
+- `.env` - Environment variables (contains all configuration)
 
 #### Required Directories:
 - `telegram_bots/download/` - For downloaded files (will be created if not exists)
@@ -91,8 +90,7 @@ docker-compose logs -f entrospies-bot
 
 ### Configuration (Read-Only)
 - `./telegram_bots/api_config.json` → `/app/telegram_bots/api_config.json`
-- `./telegram_bots/config.json` → `/app/telegram_bots/config.json`
-- `./telegram_bots/config/` → `/app/telegram_bots/config/`
+- `./telegram_bots/config/` → `/app/telegram_bots/config/` (includes channel_list.json)
 - `./telegram_bots/elasticsearch/` → `/app/telegram_bots/elasticsearch/`
 
 ### Code (Read-Only)
@@ -265,7 +263,7 @@ docker inspect entrospies-bot
 To run custom bot commands:
 ```bash
 # Access container and run custom command
-docker-compose exec entrospies-bot python3 telegram_bots/infostealer_bot.py -s session/qualgolab_telegram.session -c config.json --api-config api_config.json -m 10 --dry-run
+docker-compose exec entrospies-bot python3 telegram_bots/infostealer_bot.py -s session/qualgolab_telegram.session --api-config api_config.json -c config/channel_list.json -m 10 --dry-run
 ```
 
 ### Elasticsearch Integration
