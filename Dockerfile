@@ -29,8 +29,6 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Copy project files for bot operation
 COPY telegram_bots/ /app/telegram_bots/
-COPY CLAUDE.md /app/
-COPY README.md /app/
 
 # Create necessary directories with proper structure and permissions
 RUN mkdir -p /app/telegram_bots/download \
@@ -54,9 +52,8 @@ ENV TZ=UTC
 HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
     CMD python3 -c "import os; import sys; sys.exit(0 if os.path.exists('/app/telegram_bots/logs/message_collector.log') else 1)" || exit 1
 
-# Default command with proper session and API config
+# Default command with proper session and config
 CMD ["python3", "telegram_bots/infostealer_bot.py", \
-     "-s", "session/qualgolab_telegram.session", \
-     "--api-config", "api_config.json", \
+     "-s", "telegram_bots/session/qualgolab_telegram.session", \
      "-c", "config/channel_list.json", \
      "-v"]
