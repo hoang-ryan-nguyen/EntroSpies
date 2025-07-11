@@ -8,6 +8,7 @@ import os
 import subprocess
 import logging
 import tempfile
+import platform
 from pathlib import Path
 from typing import Optional, List, Dict, Union, Tuple
 import shutil
@@ -33,10 +34,9 @@ class ArchiveDecompressor:
         self.logger = logger or logging.getLogger(__name__)
         self.failure_logger = failure_logger
         
-        # Default 7z binary path
+        # Default 7z binary path - platform-aware
         if sevenzip_path is None:
-            current_dir = Path(__file__).parent
-            sevenzip_path = current_dir / "bin" / "7zz"
+            sevenzip_path = self._get_default_7z_path()
         
         self.sevenzip_path = Path(sevenzip_path)
         
@@ -61,6 +61,88 @@ class ArchiveDecompressor:
         }
         
         self.logger.debug(f"Archive decompressor initialized with 7z at: {self.sevenzip_path}")
+    
+    def _get_default_7z_path(self) -> Path:
+        """
+        Get the default 7z binary path based on the platform.
+        
+        Returns:
+            Path to the appropriate 7z binary
+        """
+        system = platform.system().lower()
+        
+        if system == "darwin":  # macOS
+            # Try Homebrew installation first
+            homebrew_paths = [
+                Path("/opt/homebrew/bin/7z"),  # Apple Silicon
+                Path("/usr/local/bin/7z"),     # Intel Mac
+            ]
+            
+            for path in homebrew_paths:
+                if path.exists():
+                    self.logger.debug(f"Found 7z binary via Homebrew: {path}")
+                    return path
+            
+            # Try system paths
+            system_paths = [
+                Path("/usr/bin/7z"),
+                Path("/usr/local/bin/7z"),
+            ]
+            
+            for path in system_paths:
+                if path.exists():
+                    self.logger.debug(f"Found 7z binary in system path: {path}")
+                    return path
+            
+            # If no system 7z found, suggest installation
+            raise FileNotFoundError(
+                "7z binary not found on macOS. Please install it using: brew install p7zip"
+            )
+        
+        elif system == "linux":
+            # Try system installation first
+            system_paths = [
+                Path("/usr/bin/7z"),
+                Path("/usr/local/bin/7z"),
+                Path("/usr/bin/7zz"),
+                Path("/usr/local/bin/7zz"),
+            ]
+            
+            for path in system_paths:
+                if path.exists():
+                    self.logger.debug(f"Found 7z binary in system path: {path}")
+                    return path
+            
+            # Fallback to bundled Linux binary if available
+            current_dir = Path(__file__).parent
+            bundled_path = current_dir / "bin" / "7zz"
+            
+            if bundled_path.exists():
+                self.logger.debug(f"Using bundled 7z binary: {bundled_path}")
+                return bundled_path
+            
+            raise FileNotFoundError(
+                "7z binary not found on Linux. Please install it using your package manager (e.g., apt install p7zip-full)"
+            )
+        
+        elif system == "windows":
+            # Windows paths
+            windows_paths = [
+                Path("C:/Program Files/7-Zip/7z.exe"),
+                Path("C:/Program Files (x86)/7-Zip/7z.exe"),
+            ]
+            
+            for path in windows_paths:
+                if path.exists():
+                    self.logger.debug(f"Found 7z binary on Windows: {path}")
+                    return path
+            
+            raise FileNotFoundError(
+                "7z binary not found on Windows. Please install 7-Zip from https://www.7-zip.org/"
+            )
+        
+        else:
+            raise OSError(f"Unsupported platform: {system}")
     
     def test_7z_binary(self) -> bool:
         """
@@ -109,6 +191,85 @@ class ArchiveDecompressor:
                 return True
         
         return False
+    
+    def is_wrong_password_error(self, return_code: int, error_output: str) -> bool:
+        """
+        Detect if extraction failed due to wrong password.
+        
+        Args:
+            return_code: 7z process return code
+            error_output: Error output from 7z command
+            
+        Returns:
+            True if error is due to wrong password, False otherwise
+        """
+        # 7z typically returns exit code 2 for wrong password
+        if return_code != 2:
+            return False
+        
+        # Check for common wrong password error message patterns
+        error_patterns = [
+            "Wrong password?",
+            "Cannot open encrypted archive. Wrong password?",
+            "CRC failed: Wrong password?",
+            "ERROR: Wrong password",
+            "Data error : Wrong password?",
+            "Cannot open encrypted archive"
+        ]
+        
+        error_lower = error_output.lower()
+        for pattern in error_patterns:
+            if pattern.lower() in error_lower:
+                return True
+        
+        return False
+    
+    def cleanup_on_wrong_password(self, archive_path: Union[str, Path], 
+                                 preserve_json: bool = True) -> bool:
+        """
+        Clean up archive file when wrong password is detected.
+        Optionally preserve JSON metadata files.
+        
+        Args:
+            archive_path: Path to the archive file to delete
+            preserve_json: Whether to preserve JSON files (default: True)
+            
+        Returns:
+            True if cleanup successful, False otherwise
+        """
+        archive_path = Path(archive_path)
+        
+        if not archive_path.exists():
+            self.logger.warning(f"Archive file not found for cleanup: {archive_path}")
+            return True
+        
+        try:
+            # Delete the archive file
+            archive_path.unlink()
+            self.logger.info(f"Deleted archive with wrong password: {archive_path}")
+            
+            # If preserve_json is False, also delete related JSON files
+            if not preserve_json:
+                archive_dir = archive_path.parent
+                archive_stem = archive_path.stem
+                
+                # Look for related JSON files (message.json, password.json, etc.)
+                json_files = list(archive_dir.glob(f"*{archive_stem}*.json"))
+                json_files.extend(list(archive_dir.glob("*message.json")))
+                json_files.extend(list(archive_dir.glob("*password.json")))
+                
+                for json_file in json_files:
+                    try:
+                        json_file.unlink()
+                        self.logger.info(f"Deleted related JSON file: {json_file}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to delete JSON file {json_file}: {e}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to cleanup archive with wrong password: {e}")
+            return False
     
     def list_archive_contents(self, archive_path: Union[str, Path], password: Optional[str] = None) -> List[str]:
         """
@@ -184,7 +345,8 @@ class ArchiveDecompressor:
                        create_subfolder: bool = True,
                        message_file_path: Optional[str] = None,
                        channel_name: Optional[str] = None,
-                       message_id: Optional[int] = None) -> Tuple[bool, List[str]]:
+                       message_id: Optional[int] = None,
+                       cleanup_on_wrong_password: bool = False) -> Tuple[bool, List[str], bool]:
         """
         Extract an archive to a specified directory.
         
@@ -197,9 +359,10 @@ class ArchiveDecompressor:
             message_file_path: Path to message file (for failure logging)
             channel_name: Channel name (for failure logging)
             message_id: Message ID (for failure logging)
+            cleanup_on_wrong_password: Whether to cleanup archive on wrong password (default: False)
             
         Returns:
-            Tuple of (success: bool, extracted_files: List[str])
+            Tuple of (success: bool, extracted_files: List[str], wrong_password: bool)
         """
         archive_path = Path(archive_path)
         extract_to = Path(extract_to)
@@ -223,7 +386,7 @@ class ArchiveDecompressor:
             final_extract_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             self.logger.error(f"Failed to create extraction directory: {e}")
-            return False, []
+            return False, [], False
         
         # Build 7z command
         cmd = [str(self.sevenzip_path), 'x', str(archive_path), f'-o{final_extract_dir}']
@@ -256,23 +419,39 @@ class ArchiveDecompressor:
                             extracted_files.append(rel_path)
                 
                 self.logger.info(f"Archive extracted: {len(extracted_files)} files in {extraction_time:.2f}s")
-                return True, extracted_files
+                return True, extracted_files, False
             else:
                 self.logger.error(f"Extraction failed with return code {result.returncode}")
                 self.logger.error(f"Error output: {result.stderr}")
                 
+                # Check if it's a wrong password error
+                is_wrong_password = self.is_wrong_password_error(result.returncode, result.stderr)
+                
+                if is_wrong_password:
+                    self.logger.warning(f"Detected wrong password error for archive: {archive_path}")
+                    
+                    # Cleanup archive if requested
+                    if cleanup_on_wrong_password:
+                        cleanup_success = self.cleanup_on_wrong_password(archive_path, preserve_json=True)
+                        if cleanup_success:
+                            self.logger.info(f"Cleaned up archive with wrong password: {archive_path}")
+                        else:
+                            self.logger.error(f"Failed to cleanup archive with wrong password: {archive_path}")
+                
                 # Log extraction failure
                 if self.failure_logger and message_file_path:
+                    failure_type = "wrong_password" if is_wrong_password else "extraction_failure"
                     self.failure_logger.log_archive_decompression_failure(
                         message_file_path=message_file_path,
                         archive_path=archive_path,
                         password_used=password,
                         error_message=result.stderr,
                         channel_name=channel_name,
-                        message_id=message_id
+                        message_id=message_id,
+                        failure_type=failure_type
                     )
                 
-                return False, []
+                return False, [], is_wrong_password
                 
         except subprocess.TimeoutExpired:
             self.logger.error(f"Extraction timeout for archive: {archive_path}")
@@ -285,10 +464,11 @@ class ArchiveDecompressor:
                     password_used=password,
                     error_message="Extraction timeout",
                     channel_name=channel_name,
-                    message_id=message_id
+                    message_id=message_id,
+                    failure_type="extraction_timeout"
                 )
             
-            return False, []
+            return False, [], False
         except Exception as e:
             self.logger.error(f"Error during extraction: {e}")
             
@@ -300,10 +480,11 @@ class ArchiveDecompressor:
                     password_used=password,
                     error_message=str(e),
                     channel_name=channel_name,
-                    message_id=message_id
+                    message_id=message_id,
+                    failure_type="extraction_exception"
                 )
             
-            return False, []
+            return False, [], False
     
     def test_archive(self, archive_path: Union[str, Path], password: Optional[str] = None) -> bool:
         """
@@ -359,7 +540,8 @@ class ArchiveDecompressor:
                                   max_attempts: int = 10,
                                   message_file_path: Optional[str] = None,
                                   channel_name: Optional[str] = None,
-                                  message_id: Optional[int] = None) -> Tuple[bool, Optional[str], List[str]]:
+                                  message_id: Optional[int] = None,
+                                  cleanup_on_wrong_password: bool = False) -> Tuple[bool, Optional[str], List[str], bool]:
         """
         Try to extract archive using a list of passwords.
         
@@ -371,9 +553,10 @@ class ArchiveDecompressor:
             message_file_path: Path to message file (for failure logging)
             channel_name: Channel name (for failure logging)
             message_id: Message ID (for failure logging)
+            cleanup_on_wrong_password: Whether to cleanup archive on wrong password (default: False)
             
         Returns:
-            Tuple of (success: bool, successful_password: Optional[str], extracted_files: List[str])
+            Tuple of (success: bool, successful_password: Optional[str], extracted_files: List[str], any_wrong_password: bool)
         """
         archive_path = Path(archive_path)
         
@@ -382,26 +565,32 @@ class ArchiveDecompressor:
         
         if not password_list:
             self.logger.warning("No passwords provided, trying without password")
-            success, files = self.extract_archive(archive_path, extract_to, None, 
+            success, files, wrong_password = self.extract_archive(archive_path, extract_to, None, 
                                                 message_file_path=message_file_path,
                                                 channel_name=channel_name,
-                                                message_id=message_id)
-            return success, None, files
+                                                message_id=message_id,
+                                                cleanup_on_wrong_password=cleanup_on_wrong_password)
+            return success, None, files, wrong_password
         
         attempts = min(len(password_list), max_attempts)
+        any_wrong_password = False
         
         for i, password in enumerate(password_list[:attempts]):
             self.logger.info(f"Trying password {i+1}/{attempts}: {password[:3]}***")
             
             try:
-                success, files = self.extract_archive(archive_path, extract_to, password,
+                success, files, wrong_password = self.extract_archive(archive_path, extract_to, password,
                                                     message_file_path=message_file_path,
                                                     channel_name=channel_name,
-                                                    message_id=message_id)
+                                                    message_id=message_id,
+                                                    cleanup_on_wrong_password=cleanup_on_wrong_password)
+                
+                if wrong_password:
+                    any_wrong_password = True
                 
                 if success:
                     self.logger.info(f"Successfully extracted with password: {password}")
-                    return True, password, files
+                    return True, password, files, any_wrong_password
                 else:
                     self.logger.debug(f"Password failed: {password}")
                     
@@ -413,16 +602,18 @@ class ArchiveDecompressor:
         
         # Log final failure after all password attempts
         if self.failure_logger and message_file_path:
+            failure_type = "wrong_password" if any_wrong_password else "password_attempts_exhausted"
             self.failure_logger.log_archive_decompression_failure(
                 message_file_path=message_file_path,
                 archive_path=archive_path,
                 password_used=f"Tried {attempts} passwords",
                 error_message=f"All {attempts} password attempts failed",
                 channel_name=channel_name,
-                message_id=message_id
+                message_id=message_id,
+                failure_type=failure_type
             )
         
-        return False, None, []
+        return False, None, [], any_wrong_password
     
     def get_archive_info(self, archive_path: Union[str, Path]) -> Dict[str, Union[str, int, bool]]:
         """
@@ -607,7 +798,7 @@ def main():
     
     else:
         # Extract archive
-        success, files = decompressor.extract_archive(
+        success, files, wrong_password = decompressor.extract_archive(
             archive_path, 
             args.output, 
             args.password,
@@ -617,7 +808,10 @@ def main():
         if success:
             print(f"Successfully extracted {len(files)} files to: {args.output}")
         else:
-            print("Extraction failed")
+            if wrong_password:
+                print("Extraction failed: Wrong password")
+            else:
+                print("Extraction failed")
             sys.exit(1)
 
 

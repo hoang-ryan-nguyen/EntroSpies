@@ -78,6 +78,7 @@ class BoxedPwWorkflow:
         self.config = {
             'max_password_attempts': int(os.getenv('MAX_PASSWORD_ATTEMPTS', 10)),
             'cleanup_failed_extractions': os.getenv('CLEANUP_FAILED_EXTRACTIONS', 'True').lower() == 'true',
+            'cleanup_wrong_password_archives': os.getenv('CLEANUP_WRONG_PASSWORD_ARCHIVES', 'True').lower() == 'true',
             'preserve_original_archives': os.getenv('PRESERVE_ORIGINAL_ARCHIVES', 'True').lower() == 'true',
             'extract_timeout': int(os.getenv('EXTRACTION_TIMEOUT', 300)),  # 5 minutes
             'supported_archive_formats': {'.rar', '.zip', '.7z', '.tar', '.tar.gz'},
@@ -259,9 +260,12 @@ class BoxedPwWorkflow:
             # Step 7: Cleanup if configured
             if extraction_result.get('extract_dir') and self.config['cleanup_failed_extractions']:
                 if not extraction_result['success']:
+                    cleanup_reason = "Wrong password detected" if extraction_result.get('wrong_password_detected') else "Extraction failed"
+                    self.logger.info(f"Cleaning up extraction directory due to: {cleanup_reason}")
                     self._cleanup_extraction_dir(extraction_result['extract_dir'])
             
             result['success'] = extraction_result['success']
+            result['wrong_password_detected'] = extraction_result.get('wrong_password_detected', False)
             
         except Exception as e:
             self.logger.error(f"Error processing boxed.pw download: {e}")
@@ -437,7 +441,8 @@ class BoxedPwWorkflow:
             'success': False,
             'extract_dir': None,
             'extracted_files': [],
-            'successful_password': None
+            'successful_password': None,
+            'wrong_password_detected': False
         }
         
         try:
@@ -457,15 +462,18 @@ class BoxedPwWorkflow:
             
             # Try extraction with extracted password first
             if active_password:
-                success, files = self.archive_decompressor.extract_archive(
+                success, files, wrong_password = self.archive_decompressor.extract_archive(
                     archive_file, 
                     extract_dir.parent,
                     password=active_password,
                     create_subfolder=True,
                     message_file_path=message_file_path,
                     channel_name=channel_name,
-                    message_id=message_id
+                    message_id=message_id,
+                    cleanup_on_wrong_password=self.config['cleanup_wrong_password_archives']
                 )
+                
+                extraction_result['wrong_password_detected'] = wrong_password
                 
                 if success:
                     extraction_result['success'] = True
@@ -479,17 +487,25 @@ class BoxedPwWorkflow:
                     self.logger.info(f"Successfully extracted {len(files)} files with password from {source_info}: {active_password}")
                     return extraction_result
                 else:
-                    result['warnings'].append(f"Extraction failed with extracted password: {active_password}")
-                    self.logger.warning(f"Extraction failed with password: {active_password}")
+                    if wrong_password:
+                        result['warnings'].append(f"Wrong password detected for archive: {active_password}")
+                        self.logger.warning(f"Wrong password detected for archive: {active_password}")
+                    else:
+                        result['warnings'].append(f"Extraction failed with extracted password: {active_password}")
+                        self.logger.warning(f"Extraction failed with password: {active_password}")
             
             # Try extraction without password
             self.logger.info("Trying extraction without password")
-            success, files = self.archive_decompressor.extract_archive(
+            success, files, wrong_password = self.archive_decompressor.extract_archive(
                 archive_file,
                 extract_dir.parent,
                 password=None,
                 create_subfolder=True
             )
+            
+            # Update wrong password detection if not already detected
+            if not extraction_result['wrong_password_detected']:
+                extraction_result['wrong_password_detected'] = wrong_password
             
             if success:
                 extraction_result['success'] = True
@@ -509,12 +525,20 @@ class BoxedPwWorkflow:
                     active_password.replace('-', ''),
                 ]
                 
-                success, successful_password, files = self.archive_decompressor.extract_with_password_list(
+                success, successful_password, files, any_wrong_password = self.archive_decompressor.extract_with_password_list(
                     archive_file,
                     extract_dir.parent,
                     common_passwords,
-                    max_attempts=5
+                    max_attempts=5,
+                    message_file_path=message_file_path,
+                    channel_name=channel_name,
+                    message_id=message_id,
+                    cleanup_on_wrong_password=self.config['cleanup_wrong_password_archives']
                 )
+                
+                # Update wrong password detection if not already detected
+                if not extraction_result['wrong_password_detected']:
+                    extraction_result['wrong_password_detected'] = any_wrong_password
                 
                 if success:
                     extraction_result['success'] = True

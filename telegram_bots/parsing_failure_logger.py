@@ -58,6 +58,7 @@ class ParsingFailureLogger:
         self.failure_categories = {
             'PASSWORD_EXTRACTION': 'Password could not be extracted from message',
             'ARCHIVE_DECOMPRESSION': 'Archive could not be decompressed',
+            'ARCHIVE_WRONG_PASSWORD': 'Archive has wrong password',
             'LOG_PARSING': 'Log files could not be parsed',
             'WORKFLOW_ORCHESTRATION': 'Workflow processing failed',
             'FORMAT_UNSUPPORTED': 'File format not supported',
@@ -162,7 +163,8 @@ class ParsingFailureLogger:
                                          password_used: Optional[str] = None,
                                          error_message: Optional[str] = None,
                                          channel_name: Optional[str] = None,
-                                         message_id: Optional[int] = None) -> None:
+                                         message_id: Optional[int] = None,
+                                         failure_type: Optional[str] = None) -> None:
         """
         Log an archive decompression failure.
         
@@ -173,17 +175,27 @@ class ParsingFailureLogger:
             error_message: Error message from decompression attempt
             channel_name: Channel name
             message_id: Message ID
+            failure_type: Type of failure (e.g., 'wrong_password', 'extraction_failure')
         """
         error_details = {
             'archive_path': str(archive_path),
             'password_provided': password_used is not None,
-            'error_message': error_message or 'Unknown decompression error'
+            'error_message': error_message or 'Unknown decompression error',
+            'failure_type': failure_type or 'unknown_failure'
         }
+        
+        # Use more specific failure category for wrong password
+        if failure_type == 'wrong_password':
+            category = 'ARCHIVE_WRONG_PASSWORD'
+            reason = f'Wrong password for archive: {Path(archive_path).name}'
+        else:
+            category = 'ARCHIVE_DECOMPRESSION'
+            reason = f'Failed to decompress archive: {Path(archive_path).name}'
         
         self.log_failure(
             message_file_path=message_file_path,
-            failure_category='ARCHIVE_DECOMPRESSION',
-            failure_reason=f'Failed to decompress archive: {Path(archive_path).name}',
+            failure_category=category,
+            failure_reason=reason,
             channel_name=channel_name,
             message_id=message_id,
             error_details=error_details

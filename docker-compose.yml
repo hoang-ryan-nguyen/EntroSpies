@@ -6,6 +6,7 @@ services:
       dockerfile: Dockerfile
     container_name: entrospies-bot
     restart: unless-stopped
+    command: ["python3", "telegram_bots/infostealer_bot.py", "-m", "5"]
     
     # Environment variables from .env file
     env_file:
