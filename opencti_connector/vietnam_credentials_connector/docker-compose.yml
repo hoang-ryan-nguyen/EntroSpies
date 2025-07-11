@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  vietnam-credentials-connector:
+    build: .
+    container_name: vietnam-credentials-connector
+    restart: unless-stopped
+    environment:
+      # OpenCTI Configuration
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_TOKEN}
+      
+      # Connector Configuration
+      - CONNECTOR_ID=vietnam-credentials-connector
+      - CONNECTOR_TYPE=EXTERNAL_IMPORT
+      - CONNECTOR_NAME=Vietnam Credentials Connector
+      - CONNECTOR_SCOPE=identity,location,malware,indicator,observed-data
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_CONFIDENCE_LEVEL=75
+      - CONNECTOR_LOG_LEVEL=info
+      - CONNECTOR_INTERVAL=3600
+      
+      # Elasticsearch Configuration
+      - ELASTICSEARCH_URL=${ELASTICSEARCH_URL:-https://elasticsearch:9200}
+      - ELASTICSEARCH_USERNAME=${ELASTICSEARCH_USERNAME:-elastic}
+      - ELASTICSEARCH_PASSWORD=${ELASTICSEARCH_PASSWORD}
+      - ELASTICSEARCH_INDEX=${ELASTICSEARCH_INDEX:-leaked-plaintext-passwords}
+      - ELASTICSEARCH_VERIFY_SSL=false
+      
+      # Vietnam Credentials Configuration
+      - VIETNAM_COUNTRY_CODE=VN
+      - VIETNAM_BATCH_SIZE=100
+      - VIETNAM_MAX_RESULTS=1000
+      
+    volumes:
+      - ./config.yml:/opt/opencti-connector-vietnam-credentials/config.yml:ro
+      - ./logs:/opt/opencti-connector-vietnam-credentials/logs
+    
+    depends_on:
+      - opencti
+      - elasticsearch
+    
+    networks:
+      - opencti-network
+
+networks:
+  opencti-network:
+    external: true

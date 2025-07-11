@@ -9,11 +9,18 @@ import logging
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
-# Default logs directory
+# Default configuration
 DEFAULT_LOGS_DIR = 'logs'
+DEFAULT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10MB
+DEFAULT_LOG_BACKUP_COUNT = 5
 
 def setup_logging(logs_dir=DEFAULT_LOGS_DIR):
     """Setup comprehensive logging system with persistent log files."""
+    # Get configuration from environment variables or use defaults
+    logs_dir = os.getenv('LOGS_DIR', logs_dir)
+    max_log_size = int(os.getenv('LOG_MAX_SIZE', DEFAULT_LOG_MAX_SIZE))
+    backup_count = int(os.getenv('LOG_BACKUP_COUNT', DEFAULT_LOG_BACKUP_COUNT))
+    
     # Create logs directory
     os.makedirs(logs_dir, exist_ok=True)
     
@@ -36,11 +43,11 @@ def setup_logging(logs_dir=DEFAULT_LOGS_DIR):
     # Clear any existing handlers
     logger.handlers.clear()
     
-    # File handler - detailed logging with rotation (max 10MB, keep 5 files)
+    # File handler - detailed logging with rotation
     file_handler = RotatingFileHandler(
         os.path.join(logs_dir, 'message_collector.log'),
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5,
+        maxBytes=max_log_size,
+        backupCount=backup_count,
         encoding='utf-8'
     )
     file_handler.setLevel(logging.DEBUG)
@@ -66,8 +73,8 @@ def setup_logging(logs_dir=DEFAULT_LOGS_DIR):
     
     compliance_handler = RotatingFileHandler(
         os.path.join(logs_dir, 'compliance.log'),
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5,
+        maxBytes=max_log_size,
+        backupCount=backup_count,
         encoding='utf-8'
     )
     compliance_handler.setLevel(logging.INFO)
@@ -85,8 +92,8 @@ def setup_logging(logs_dir=DEFAULT_LOGS_DIR):
     
     error_handler = RotatingFileHandler(
         os.path.join(logs_dir, 'errors.log'),
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5,
+        maxBytes=max_log_size,
+        backupCount=backup_count,
         encoding='utf-8'
     )
     error_handler.setLevel(logging.ERROR)

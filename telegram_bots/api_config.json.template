@@ -1,0 +1,8 @@
+{
+  "telegram_api": {
+    "api_id": "${TELEGRAM_API_ID}",
+    "api_hash": "${TELEGRAM_API_HASH}"
+  },
+  "description": "Telegram API credentials for EntroSpies project (template)",
+  "note": "Copy this file to api_config.json and replace placeholders with actual values, or use environment variables TELEGRAM_API_ID and TELEGRAM_API_HASH"
+}

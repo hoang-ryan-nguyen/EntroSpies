@@ -22,13 +22,13 @@ from telethon_download_manager import TelethonDownloadManager as DownloadManager
 from master_workflow_orchestrator import MasterWorkflowOrchestrator
 
 # Default configuration
-DEFAULT_SESSION = 'entrospies_session'
-DEFAULT_CONFIG = 'config.json'
-DEFAULT_API_CONFIG = 'api_config.json'
-DEFAULT_OUTPUT_DIR = 'download'
-DEFAULT_LOGS_DIR = 'logs'
-DEFAULT_MESSAGES = 1
-DEFAULT_MAX_FILE_SIZE = 1024 * 1024 * 1024  # 1GB
+DEFAULT_SESSION = os.getenv('SESSION_NAME', 'entrospies_session')
+DEFAULT_CONFIG = os.getenv('CONFIG_FILE', 'config.json')
+DEFAULT_API_CONFIG = os.getenv('API_CONFIG_FILE', 'api_config.json')
+DEFAULT_OUTPUT_DIR = os.getenv('DOWNLOAD_DIR', 'download')
+DEFAULT_LOGS_DIR = os.getenv('LOGS_DIR', 'logs')
+DEFAULT_MESSAGES = int(os.getenv('DEFAULT_MESSAGES', 1))
+DEFAULT_MAX_FILE_SIZE = int(os.getenv('DEFAULT_MAX_FILE_SIZE', 1024 * 1024 * 1024))  # 1GB
 
 def parse_size(size_str):
     """Parse size string (e.g., '500MB', '1GB') to bytes."""
@@ -61,7 +61,22 @@ def parse_size(size_str):
     return int(number * multipliers[unit])
 
 def load_api_credentials(api_config_path=DEFAULT_API_CONFIG):
-    """Load Telegram API credentials from separate config file."""
+    """Load Telegram API credentials from environment variables or config file."""
+    # Try environment variables first
+    env_api_id = os.getenv('TELEGRAM_API_ID')
+    env_api_hash = os.getenv('TELEGRAM_API_HASH')
+    
+    if env_api_id and env_api_hash:
+        try:
+            api_id = int(env_api_id)
+            api_hash = env_api_hash
+            print("Using API credentials from environment variables")
+            return api_id, api_hash
+        except ValueError:
+            print("Error: TELEGRAM_API_ID must be a valid integer")
+            sys.exit(1)
+    
+    # Fallback to config file
     try:
         with open(api_config_path, 'r', encoding='utf-8') as f:
             api_config = json.load(f)
@@ -70,6 +85,12 @@ def load_api_credentials(api_config_path=DEFAULT_API_CONFIG):
         api_id = telegram_api.get('api_id')
         api_hash = telegram_api.get('api_hash')
         
+        # Handle template placeholders
+        if isinstance(api_id, str) and api_id.startswith('${'):
+            print(f"Warning: API config file appears to be a template. Please set actual values or use environment variables.")
+            print("Environment variables: TELEGRAM_API_ID and TELEGRAM_API_HASH")
+            sys.exit(1)
+        
         if not api_id or not api_hash:
             raise ValueError("Missing api_id or api_hash in API configuration")
         
@@ -77,8 +98,10 @@ def load_api_credentials(api_config_path=DEFAULT_API_CONFIG):
         
     except FileNotFoundError:
         print(f"Error: API config file {api_config_path} not found")
-        print("Please create an api_config.json file with your Telegram API credentials:")
-        print('{"telegram_api": {"api_id": YOUR_API_ID, "api_hash": "YOUR_API_HASH"}}')
+        print("Please either:")
+        print("1. Set environment variables: TELEGRAM_API_ID and TELEGRAM_API_HASH")
+        print("2. Create an api_config.json file with your Telegram API credentials:")
+        print('   {"telegram_api": {"api_id": YOUR_API_ID, "api_hash": "YOUR_API_HASH"}}')
         sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"Error: Invalid JSON in API config file: {e}")
@@ -198,8 +221,44 @@ Examples:
     
     return parser
 
+def check_session_files(session_path):
+    """Check for multiple session files and quit if more than one exists."""
+    # If session path is provided and exists, use it
+    if session_path != DEFAULT_SESSION and os.path.exists(session_path):
+        return session_path
+    
+    # If no specific session provided, check the default session directory
+    session_dir = 'session'
+    if not os.path.exists(session_dir):
+        print(f"Error: Session directory does not exist: {session_dir}")
+        sys.exit(1)
+    
+    # Find all .session files in the session directory
+    session_files = [f for f in os.listdir(session_dir) if f.endswith('.session')]
+    
+    if len(session_files) == 0:
+        print(f"Error: No .session files found in {session_dir} directory")
+        print("Please create a session file first using the Telegram API")
+        sys.exit(1)
+    elif len(session_files) == 1:
+        # Only one session file, use it
+        selected_session = os.path.join(session_dir, session_files[0])
+        print(f"Using session file: {selected_session}")
+        return selected_session
+    else:
+        # Multiple session files found, quit with error message
+        print(f"Error: Multiple session files found in {session_dir} directory:")
+        for session_file in session_files:
+            print(f"  - {session_file}")
+        print("Only one .session file is allowed in the session directory.")
+        print("Please specify which session file to use with the -s/--session option.")
+        sys.exit(1)
+
 def validate_arguments(args):
     """Validate and process command-line arguments."""
+    # Handle session file selection
+    args.session = check_session_files(args.session)
+    
     # Validate session file directory
     session_dir = os.path.dirname(os.path.abspath(args.session)) if os.path.dirname(args.session) else '.'
     if not os.path.exists(session_dir):

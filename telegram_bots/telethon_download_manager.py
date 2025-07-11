@@ -12,9 +12,10 @@ from datetime import datetime
 from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
 
 # Optimized download configuration for speed
-MAX_CONCURRENT_DOWNLOADS = 5  # Increased for faster downloads
-DOWNLOAD_RATE_LIMIT = 0.1  # Reduced delay for speed
-DEFAULT_DOWNLOAD_DIR = 'download'
+import os
+MAX_CONCURRENT_DOWNLOADS = int(os.getenv('MAX_CONCURRENT_DOWNLOADS', 5))  # Increased for faster downloads
+DOWNLOAD_RATE_LIMIT = float(os.getenv('DOWNLOAD_RATE_LIMIT', 0.1))  # Reduced delay for speed
+DEFAULT_DOWNLOAD_DIR = os.getenv('DOWNLOAD_DIR', 'download')
 
 def sanitize_filename(filename):
     """Sanitize filename for safe directory creation."""

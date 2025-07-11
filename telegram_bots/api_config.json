@@ -4,5 +4,5 @@
     "api_hash": "c6c18b8be2b390849aa6ee4289de0270"
   },
   "description": "Telegram API credentials for EntroSpies project",
-  "note": "Keep this file secure and do not commit to version control"
+  "note": "WARNING: This file contains sensitive credentials. Do not commit to version control. Use environment variables or api_config.json.template for production deployments"
 }

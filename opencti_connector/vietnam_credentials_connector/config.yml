@@ -1,0 +1,27 @@
+opencti:
+  url: 'http://localhost:8080'
+  token: 'ChangeMe'
+
+connector:
+  id: 'vietnam-credentials-connector'
+  type: 'EXTERNAL_IMPORT'
+  name: 'Vietnam Credentials Connector'
+  scope: 'identity,location,malware,indicator,observed-data'
+  auto: true
+  confidence_level: 75
+  log_level: 'info'
+  interval: 3600  # Run every hour
+
+elasticsearch:
+  url: 'https://localhost:9200'
+  username: 'elastic'
+  password: 'changeme'
+  index: 'leaked-plaintext-passwords'
+  verify_ssl: false
+
+vietnam_credentials:
+  country_code: 'VN'
+  batch_size: 100
+  max_results: 1000
+  include_channels: []  # Empty = all channels
+  exclude_channels: []  # Channels to exclude

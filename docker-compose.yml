@@ -1,71 +1,82 @@
-version: '3.8'
-
 services:
-  # Main EntroSpies Telegram Bot
+  # EntroSpies Telegram Bot Service
   entrospies-bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: entrospies-bot
     restart: unless-stopped
-    volumes:
-      # Mount configuration files
-      - ./telegram_bots/api_config.json:/app/telegram_bots/api_config.json:ro
-      - ./telegram_bots/config.json:/app/telegram_bots/config.json:ro
-      # Mount session directory for persistence
-      - ./telegram_bots/session:/app/telegram_bots/session
-      # Mount download directory for data persistence
-      - entrospies-downloads:/app/telegram_bots/download
-      # Mount logs directory for monitoring
-      - entrospies-logs:/app/telegram_bots/logs
-      # Mount parser modules
-      - ./telegram_bots/infostealer_parser:/app/telegram_bots/infostealer_parser:ro
-      # Mount utility scripts
-      - ./telegram_bots/scripts:/app/telegram_bots/scripts:ro
+    
+    # Environment variables from .env file
+    env_file:
+      - .env
+    
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=UTC
-      # Optional: External Elasticsearch connection
-      - ELASTICSEARCH_URL=${ELASTICSEARCH_URL}
-      - ELASTICSEARCH_USERNAME=${ELASTICSEARCH_USERNAME}
-      - ELASTICSEARCH_PASSWORD=${ELASTICSEARCH_PASSWORD}
-    command: >
-      sh -c "cd telegram_bots && 
-             python3 infostealer_bot.py 
-             -s session/qualgolab_telegram.session 
-             -c config.json 
-             --api-config api_config.json 
-             -vvv 
-             -m 5"
+      - PYTHONPATH=/app
+    
+    # Volume mounts for persistent data
+    volumes:
+      # Configuration files (read-only)
+      - ./telegram_bots/api_config.json:/app/telegram_bots/api_config.json:ro
+      - ./telegram_bots/config.json:/app/telegram_bots/config.json:ro
+      
+      # Persistent data directories (read-write)
+      - ./telegram_bots/download:/app/telegram_bots/download
+      - ./telegram_bots/logs:/app/telegram_bots/logs
+      - ./telegram_bots/session:/app/telegram_bots/session
+      
+      # Code directories (read-only for security)
+      - ./telegram_bots/infostealer_parser:/app/telegram_bots/infostealer_parser:ro
+      - ./telegram_bots/scripts:/app/telegram_bots/scripts:ro
+      - ./telegram_bots/config:/app/telegram_bots/config:ro
+      - ./telegram_bots/elasticsearch:/app/telegram_bots/elasticsearch:ro
+      
+      # Bot files (read-only)
+      - ./telegram_bots/infostealer_bot.py:/app/telegram_bots/infostealer_bot.py:ro
+      - ./telegram_bots/logger.py:/app/telegram_bots/logger.py:ro
+      - ./telegram_bots/telethon_download_manager.py:/app/telegram_bots/telethon_download_manager.py:ro
+      - ./telegram_bots/archive_decompressor.py:/app/telegram_bots/archive_decompressor.py:ro
+      - ./telegram_bots/master_workflow_orchestrator.py:/app/telegram_bots/master_workflow_orchestrator.py:ro
+    
+    # Network configuration
     networks:
       - entrospies-network
+    
+    # Health check
     healthcheck:
-      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "python3", "-c", "import os; import sys; sys.exit(0 if os.path.exists('/app/telegram_bots/logs/message_collector.log') else 1)"]
+      interval: 60s
+      timeout: 30s
       retries: 3
-      start_period: 10s
+      start_period: 20s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    
+    # Labels for organization
+    labels:
+      - "com.entrospies.service=telegram-bot"
+      - "com.entrospies.version=1.0"
+      - "com.entrospies.description=EntroSpies Telegram Infostealer Bot"
 
-volumes:
-  # Persistent storage for downloaded files
-  entrospies-downloads:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./telegram_bots/download
-
-  # Persistent storage for logs
-  entrospies-logs:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./telegram_bots/logs
-
+# Network configuration
 networks:
   entrospies-network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+    name: entrospies-network

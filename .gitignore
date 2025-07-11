@@ -3,6 +3,12 @@ entrospies/
 
 # Environment Variables
 .env
+.env.local
+.env.production
+
+# API Credentials
+api_config.json
+telegram_bots/api_config.json
 
 # Python
 __pycache__/
@@ -36,3 +42,6 @@ CLAUDE.md
 # session
 *.session
 session/
+
+# download
+telegram_bots/download/

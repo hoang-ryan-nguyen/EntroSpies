@@ -1,0 +1,47 @@
+# Exclude large data directories and files that shouldn't be in the image
+telegram_bots/download/
+telegram_bots/logs/
+telegram_bots/session/
+venv_entrospies/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Exclude git and other version control
+.git/
+.gitignore
+.gitattributes
+
+# Exclude temporary files
+*.tmp
+*.temp
+*.log
+*.lock
+
+# Exclude OpenCTI connector (not needed for telegram bot)
+opencti_connector/
+
+# Exclude test files
+test_*.py
+*_test.py
+tests/
+
+# Exclude documentation that's not needed in container
+*.md
+!README.md
+!CLAUDE.md
+
+# Exclude development files
+.env
+.env.local
+.env.*.local
+docker-compose.override.yml

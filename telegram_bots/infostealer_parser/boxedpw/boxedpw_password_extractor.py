@@ -1,106 +1,79 @@
 #!/usr/bin/env python3
 """
-Password Extractor Module for EntroSpies project.
-Extracts passwords from Telegram message text using various patterns commonly found in infostealer channels.
+BoxedPw Password Extractor Module for EntroSpies project.
+Wrapper around the generic password extractor, optimized for boxed.pw channel.
 """
 
 import re
 import json
 import logging
+import sys
 from typing import Optional, List, Dict, Union
 from pathlib import Path
 
+# Import the generic password extractor
+try:
+    from ..generic_password_extractor import GenericPasswordExtractor
+except ImportError:
+    # Try importing from project root
+    current_dir = Path(__file__).parent
+    sys.path.insert(0, str(current_dir.parent))
+    from generic_password_extractor import GenericPasswordExtractor
+
 class PasswordExtractor:
     """
-    Extracts passwords from Telegram message text using multiple pattern matching techniques.
-    Designed to handle various password formats found in infostealer channels.
-    
-    This class can be integrated into the main infostealer_bot.py for automatic password extraction.
+    BoxedPw-specific password extractor wrapper around the generic extractor.
+    Maintains backward compatibility while using the new JSON-based pattern system.
     """
     
     def __init__(self, logger: Optional[logging.Logger] = None):
         """
-        Initialize the password extractor with predefined patterns.
+        Initialize the password extractor using the generic extractor optimized for boxed.pw.
         
         Args:
             logger: Optional logger instance for debugging
         """
         self.logger = logger or logging.getLogger(__name__)
         
-        # Define password extraction patterns (ordered by specificity)
-        self.password_patterns = [
-            # Pattern 1: [🔑 .pass:](link) ```password```
-            {
-                'name': 'emoji_pass_code_block',
-                'pattern': r'🔑\s*\.?pass:?\]\([^)]*\)\s*```([^`]+)```',
-                'flags': re.IGNORECASE | re.MULTILINE
-            },
-            
-            # Pattern 2: [🔑 .pass:](link) password (without code blocks)
-            {
-                'name': 'emoji_pass_simple',
-                'pattern': r'🔑\s*\.?pass:?\]\([^)]*\)\s*([^\n\s]+)',
-                'flags': re.IGNORECASE | re.MULTILINE
-            },
-            
-            # Pattern 3: Password: ```password```
-            {
-                'name': 'password_label_code_block',
-                'pattern': r'password\s*:?\s*```([^`]+)```',
-                'flags': re.IGNORECASE | re.MULTILINE
-            },
-            
-            # Pattern 4: Pass: password
-            {
-                'name': 'pass_label_simple',
-                'pattern': r'pass\s*:?\s*([^\n\s]+)',
-                'flags': re.IGNORECASE | re.MULTILINE
-            },
-            
-            # Pattern 5: .pass: password
-            {
-                'name': 'dot_pass_simple',
-                'pattern': r'\.pass\s*:?\s*([^\n\s]+)',
-                'flags': re.IGNORECASE | re.MULTILINE
-            },
-            
-            # Pattern 6: 🔑 password (emoji followed by password, but not in markdown link format)
-            {
-                'name': 'emoji_direct',
-                'pattern': r'🔑\s+(?![.\w]*:?\]\()([^\n\s]+)',
-                'flags': re.IGNORECASE | re.MULTILINE
-            },
-            
-            # Pattern 7: Code block containing only password-like string
-            {
-                'name': 'standalone_code_block',
-                'pattern': r'```([A-Za-z0-9@#$%^&*!_+-]+)```',
-                'flags': re.MULTILINE
-            },
-            
-            # Pattern 8: Archive password indicators
-            {
-                'name': 'archive_password',
-                'pattern': r'(?:archive|zip|rar)\s*password\s*:?\s*([^\n\s]+)',
-                'flags': re.IGNORECASE | re.MULTILINE
-            }
-        ]
+        # Initialize the generic extractor with boxed.pw channel optimization
+        self.generic_extractor = GenericPasswordExtractor(
+            logger=self.logger,
+            channel_name='boxed.pw'
+        )
         
-        # Common false positives to filter out
-        self.false_positives = {
-            'password', 'pass', '123456', 'admin', 'user', 'test', 'demo',
-            'example', 'sample', 'default', 'none', 'null', 'empty'
-        }
-        
-        # Minimum password length
+        # Maintain backward compatibility properties
+        self.password_patterns = []
+        self.false_positives = set()
         self.min_password_length = 3
-        
-        # Maximum password length (to avoid extracting entire text blocks)
         self.max_password_length = 50
+        
+        # Load properties from generic extractor for compatibility
+        self._sync_properties()
+        
+        self.logger.info("BoxedPw password extractor initialized using generic patterns")
+    
+    def _sync_properties(self):
+        """Sync properties from generic extractor for backward compatibility."""
+        try:
+            validation_rules = self.generic_extractor.validation_rules
+            self.min_password_length = validation_rules.get('min_length', 3)
+            self.max_password_length = validation_rules.get('max_length', 50)
+            self.false_positives = set(validation_rules.get('false_positives', []))
+            
+            # Convert generic patterns to old format for compatibility
+            self.password_patterns = []
+            for pattern in self.generic_extractor.password_patterns:
+                self.password_patterns.append({
+                    'name': pattern['name'],
+                    'pattern': pattern['pattern'],
+                    'flags': pattern['compiled_flags']
+                })
+        except Exception as e:
+            self.logger.warning(f"Could not sync properties from generic extractor: {e}")
     
     def extract_password(self, message_text: str) -> Optional[str]:
         """
-        Extract password from message text using multiple patterns.
+        Extract password from message text using the generic extractor.
         
         Args:
             message_text: The message text to analyze
@@ -108,32 +81,7 @@ class PasswordExtractor:
         Returns:
             Extracted password string or None if no password found
         """
-        if not message_text or not isinstance(message_text, str):
-            return None
-        
-        self.logger.debug(f"Analyzing message text for passwords: {message_text[:100]}...")
-        
-        # Try each pattern in order of specificity
-        for pattern_info in self.password_patterns:
-            pattern = pattern_info['pattern']
-            flags = pattern_info['flags']
-            name = pattern_info['name']
-            
-            try:
-                matches = re.findall(pattern, message_text, flags)
-                if matches:
-                    # Get the first match and clean it
-                    password = self._clean_password(matches[0])
-                    if self._is_valid_password(password):
-                        self.logger.info(f"Password extracted using pattern '{name}': {password}")
-                        return password
-                    else:
-                        self.logger.debug(f"Pattern '{name}' matched but password failed validation: {password}")
-            except Exception as e:
-                self.logger.error(f"Error applying pattern '{name}': {e}")
-        
-        self.logger.debug("No valid password found in message text")
-        return None
+        return self.generic_extractor.extract_password(message_text)
     
     def extract_passwords_batch(self, message_texts: List[str]) -> List[Optional[str]]:
         """
@@ -145,7 +93,7 @@ class PasswordExtractor:
         Returns:
             List of extracted passwords (None for messages without passwords)
         """
-        return [self.extract_password(text) for text in message_texts]
+        return self.generic_extractor.extract_passwords_batch(message_texts)
     
     def extract_from_json_file(self, json_file_path: Union[str, Path]) -> Optional[str]:
         """
@@ -157,34 +105,7 @@ class PasswordExtractor:
         Returns:
             Extracted password string or None if no password found
         """
-        try:
-            with open(json_file_path, 'r', encoding='utf-8') as f:
-                message_data = json.load(f)
-            
-            # Extract text from various possible fields
-            message_text = message_data.get('text', '')
-            if not message_text:
-                # Try alternative field names
-                message_text = message_data.get('message', '') or message_data.get('content', '')
-            
-            if message_text:
-                password = self.extract_password(message_text)
-                if password:
-                    self.logger.info(f"Password extracted from {json_file_path}: {password}")
-                return password
-            else:
-                self.logger.warning(f"No text content found in {json_file_path}")
-                return None
-                
-        except FileNotFoundError:
-            self.logger.error(f"JSON file not found: {json_file_path}")
-            return None
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Invalid JSON in file {json_file_path}: {e}")
-            return None
-        except Exception as e:
-            self.logger.error(f"Error reading JSON file {json_file_path}: {e}")
-            return None
+        return self.generic_extractor.extract_from_json_file(json_file_path)
     
     def extract_from_directory(self, directory_path: Union[str, Path]) -> Dict[str, Optional[str]]:
         """
@@ -196,6 +117,7 @@ class PasswordExtractor:
         Returns:
             Dictionary mapping file paths to extracted passwords
         """
+        # Use generic extractor's directory processing
         results = {}
         directory = Path(directory_path)
         
@@ -212,7 +134,7 @@ class PasswordExtractor:
         
         for json_file in json_files:
             try:
-                password = self.extract_from_json_file(json_file)
+                password = self.generic_extractor.extract_from_json_file(json_file)
                 results[str(json_file)] = password
             except Exception as e:
                 self.logger.error(f"Error processing {json_file}: {e}")
@@ -222,7 +144,7 @@ class PasswordExtractor:
     
     def _clean_password(self, password: str) -> str:
         """
-        Clean and normalize extracted password.
+        Clean and normalize extracted password (delegated to generic extractor).
         
         Args:
             password: Raw extracted password string
@@ -230,27 +152,11 @@ class PasswordExtractor:
         Returns:
             Cleaned password string
         """
-        if not password:
-            return ""
-        
-        # Remove common unwanted characters and whitespace
-        cleaned = password.strip()
-        
-        # Remove markdown formatting
-        cleaned = re.sub(r'[*_`~]', '', cleaned)
-        
-        # Remove URLs if accidentally captured (but preserve Telegram links as they can be passwords)
-        if 't.me/' not in cleaned:
-            cleaned = re.sub(r'https?://[^\s]+', '', cleaned)
-        
-        # Remove newlines and extra whitespace
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        
-        return cleaned
+        return self.generic_extractor._clean_password(password)
     
     def _is_valid_password(self, password: str) -> bool:
         """
-        Validate if extracted string is likely a real password.
+        Validate if extracted string is likely a real password (delegated to generic extractor).
         
         Args:
             password: Password string to validate
@@ -258,34 +164,7 @@ class PasswordExtractor:
         Returns:
             True if password appears valid, False otherwise
         """
-        if not password:
-            return False
-        
-        # Check length
-        if len(password) < self.min_password_length or len(password) > self.max_password_length:
-            return False
-        
-        # Check for false positives
-        if password.lower() in self.false_positives:
-            return False
-        
-        # Allow passwords that start with @ (common in Telegram)
-        if password.startswith('@') and len(password) > 1:
-            return True
-        
-        # Allow Telegram links as they are commonly used as passwords in infostealer channels
-        if password.startswith(('http://', 'https://', 'www.')):
-            if 't.me/' in password:
-                return True
-            # Reject other URLs
-            return False
-        
-        # Check if it contains only whitespace or special characters
-        if not re.search(r'[A-Za-z0-9]', password):
-            return False
-        
-        # Password seems valid
-        return True
+        return self.generic_extractor._is_valid_password(password)
     
     def get_pattern_statistics(self, message_texts: List[str]) -> Dict[str, int]:
         """
@@ -297,25 +176,7 @@ class PasswordExtractor:
         Returns:
             Dictionary with pattern names and success counts
         """
-        stats = {pattern['name']: 0 for pattern in self.password_patterns}
-        
-        for text in message_texts:
-            for pattern_info in self.password_patterns:
-                pattern = pattern_info['pattern']
-                flags = pattern_info['flags']
-                name = pattern_info['name']
-                
-                try:
-                    matches = re.findall(pattern, text, flags)
-                    if matches:
-                        password = self._clean_password(matches[0])
-                        if self._is_valid_password(password):
-                            stats[name] += 1
-                            break  # Only count first successful pattern per message
-                except Exception:
-                    continue
-        
-        return stats
+        return self.generic_extractor.get_pattern_statistics(message_texts)
     
     def extract_and_save_password(self, message_text: str, message_file_path: Union[str, Path]) -> Optional[str]:
         """
@@ -329,7 +190,7 @@ class PasswordExtractor:
         Returns:
             Extracted password string or None if no password found
         """
-        password = self.extract_password(message_text)
+        password = self.generic_extractor.extract_password(message_text)
         
         if password:
             # Create .password file next to the message file
@@ -376,19 +237,29 @@ class PasswordExtractor:
             message_data['has_password'] = False
         
         return message_data
+    
+    def get_extractor_info(self) -> Dict:
+        """
+        Get information about the extractor configuration.
+        
+        Returns:
+            Dictionary with extractor configuration details
+        """
+        return self.generic_extractor.get_extractor_info()
 
 
 def main():
     """
-    Command-line interface for testing the password extractor.
+    Command-line interface for testing the BoxedPw password extractor.
     """
     import argparse
     import sys
     
-    parser = argparse.ArgumentParser(description='Extract passwords from Telegram message files')
+    parser = argparse.ArgumentParser(description='Extract passwords from Telegram message files (BoxedPw)')
     parser.add_argument('input', help='JSON file or directory path')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
     parser.add_argument('-s', '--stats', action='store_true', help='Show pattern statistics')
+    parser.add_argument('-i', '--info', action='store_true', help='Show extractor configuration info')
     
     args = parser.parse_args()
     
@@ -398,6 +269,14 @@ def main():
     
     # Create extractor
     extractor = PasswordExtractor()
+    
+    if args.info:
+        info = extractor.get_extractor_info()
+        print("BoxedPw Password Extractor Configuration:")
+        print("=" * 50)
+        for key, value in info.items():
+            print(f"{key}: {value}")
+        print()
     
     input_path = Path(args.input)
     

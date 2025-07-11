@@ -11,14 +11,35 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Union, Any
 import shutil
-import tempfile
-
-# Import required modules
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from boxedpw_password_extractor import PasswordExtractor
-from archive_decompressor import ArchiveDecompressor
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+try:
+    from boxedpw_password_extractor import PasswordExtractor
+    from boxedpw_log_parser import BoxedPwLogParser
+except ImportError:
+    # Try relative import from same directory
+    from .boxedpw_password_extractor import PasswordExtractor
+    from .boxedpw_log_parser import BoxedPwLogParser
+
+try:
+    from archive_decompressor import ArchiveDecompressor
+except ImportError:
+    # Try importing from project root
+    sys.path.insert(0, str(project_root))
+    from archive_decompressor import ArchiveDecompressor
+
+# Import Elasticsearch client
+try:
+    from elasticsearch.infostealer_elasticsearch_client import InfostealerElasticsearchClient
+except ImportError:
+    # Try importing from project root
+    elasticsearch_path = project_root / "elasticsearch"
+    sys.path.insert(0, str(elasticsearch_path))
+    from infostealer_elasticsearch_client import InfostealerElasticsearchClient
 
 
 class BoxedPwWorkflow:
@@ -44,20 +65,25 @@ class BoxedPwWorkflow:
         
         self.base_download_dir = Path(base_download_dir)
         
+        # Workflow configuration with environment variable support
+        self.config = {
+            'max_password_attempts': int(os.getenv('MAX_PASSWORD_ATTEMPTS', 10)),
+            'cleanup_failed_extractions': os.getenv('CLEANUP_FAILED_EXTRACTIONS', 'True').lower() == 'true',
+            'preserve_original_archives': os.getenv('PRESERVE_ORIGINAL_ARCHIVES', 'True').lower() == 'true',
+            'extract_timeout': int(os.getenv('EXTRACTION_TIMEOUT', 300)),  # 5 minutes
+            'supported_archive_formats': {'.rar', '.zip', '.7z', '.tar', '.tar.gz'},
+            'log_file_patterns': ['*.txt', '*.log', '*.csv', '*.json'],
+            'max_extraction_size': int(os.getenv('MAX_EXTRACTION_SIZE', 100 * 1024 * 1024)),  # 100MB limit
+        }
+        
         # Initialize components
         self.password_extractor = PasswordExtractor(self.logger)
         self.archive_decompressor = ArchiveDecompressor(logger=self.logger)
-        
-        # Workflow configuration
-        self.config = {
-            'max_password_attempts': 10,
-            'cleanup_failed_extractions': True,
-            'preserve_original_archives': True,
-            'extract_timeout': 300,  # 5 minutes
-            'supported_archive_formats': {'.rar', '.zip', '.7z', '.tar', '.tar.gz'},
-            'log_file_patterns': ['*.txt', '*.log', '*.csv', '*.json'],
-            'max_extraction_size': 100 * 1024 * 1024,  # 100MB limit
-        }
+        self.log_parser = BoxedPwLogParser(logger=self.logger, max_file_size=self.config.get('max_extraction_size'))
+        self.elasticsearch_client = InfostealerElasticsearchClient(
+            logger=self.logger,
+            parser_version='boxedpw-1.0'
+        )
         
         self.logger.info("Boxed.pw workflow processor initialized")
     
@@ -126,13 +152,52 @@ class BoxedPwWorkflow:
             
             # Step 4: Parse extracted logs if extraction successful
             if extraction_result['success']:
-                log_parsing_result = self._parse_extracted_logs(
+                log_parsing_result = self.log_parser.parse_extracted_logs(
                     extraction_result['extract_dir'],
                     extraction_result['extracted_files']
                 )
                 result['log_parsing_results'] = log_parsing_result
             
-            # Step 5: Cleanup if configured
+            # Step 5: Parse credential files if extraction successful
+            if extraction_result['success']:
+                credential_parsing_result = self.log_parser.parse_all_credential_files(
+                    extraction_result['extract_dir'],
+                    extraction_result['extracted_files']
+                )
+                result['credential_parsing_results'] = credential_parsing_result
+                
+                # Step 6: Upload credentials to Elasticsearch if enabled and credentials found
+                if credential_parsing_result['total_credentials'] > 0 and self.elasticsearch_client.is_enabled():
+                    self.logger.info(f"Uploading {credential_parsing_result['total_credentials']} credentials to Elasticsearch")
+                    
+                    # Initialize Elasticsearch connection
+                    if self.elasticsearch_client.test_connection():
+                        upload_result = self.elasticsearch_client.upload_credentials(
+                            credential_parsing_result['all_credentials']
+                        )
+                        result['elasticsearch_upload'] = upload_result
+                        
+                        self.logger.info(f"Elasticsearch upload completed: {upload_result['uploaded']} uploaded, {upload_result['duplicates_skipped']} duplicates, {upload_result['errors']} errors")
+                    else:
+                        self.logger.error("Failed to connect to Elasticsearch")
+                        result['elasticsearch_upload'] = {
+                            'uploaded': 0,
+                            'duplicates_skipped': 0,
+                            'errors': 1,
+                            'total_processed': 0,
+                            'error_message': 'Failed to connect to Elasticsearch'
+                        }
+                elif credential_parsing_result['total_credentials'] > 0:
+                    self.logger.info(f"Found {credential_parsing_result['total_credentials']} credentials but Elasticsearch upload is disabled")
+                    result['elasticsearch_upload'] = {
+                        'uploaded': 0,
+                        'duplicates_skipped': 0,
+                        'errors': 0,
+                        'total_processed': 0,
+                        'disabled': True
+                    }
+            
+            # Step 7: Cleanup if configured
             if extraction_result.get('extract_dir') and self.config['cleanup_failed_extractions']:
                 if not extraction_result['success']:
                     self._cleanup_extraction_dir(extraction_result['extract_dir'])
@@ -321,230 +386,6 @@ class BoxedPwWorkflow:
         
         return extraction_result
     
-    def _parse_extracted_logs(self, extract_dir: Path, extracted_files: List[str]) -> Dict[str, Any]:
-        """
-        Parse extracted log files for credentials and useful information.
-        
-        Args:
-            extract_dir: Directory containing extracted files
-            extracted_files: List of extracted file paths
-            
-        Returns:
-            Dictionary with parsing results
-        """
-        parsing_result = {
-            'log_files_processed': 0,
-            'total_files': len(extracted_files),
-            'credentials_found': 0,
-            'parsing_errors': [],
-            'file_types': {},
-            'summary': {}
-        }
-        
-        try:
-            self.logger.info(f"Parsing {len(extracted_files)} extracted files")
-            
-            # Analyze file types
-            for file_path in extracted_files:
-                full_path = extract_dir / file_path
-                if full_path.exists() and full_path.is_file():
-                    file_ext = full_path.suffix.lower()
-                    parsing_result['file_types'][file_ext] = parsing_result['file_types'].get(file_ext, 0) + 1
-            
-            # Look for log files to parse
-            log_files = self._find_log_files(extract_dir, extracted_files)
-            parsing_result['log_files_processed'] = len(log_files)
-            
-            if log_files:
-                self.logger.info(f"Found {len(log_files)} log files to parse")
-                
-                # Parse each log file
-                for log_file in log_files:
-                    try:
-                        log_result = self._parse_single_log_file(log_file)
-                        parsing_result['credentials_found'] += log_result.get('credentials_count', 0)
-                    except Exception as e:
-                        parsing_result['parsing_errors'].append(f"Error parsing {log_file}: {str(e)}")
-                        self.logger.error(f"Error parsing log file {log_file}: {e}")
-            
-            # Generate summary
-            parsing_result['summary'] = {
-                'total_files': len(extracted_files),
-                'log_files_found': len(log_files),
-                'file_types': list(parsing_result['file_types'].keys()),
-                'credentials_found': parsing_result['credentials_found'] > 0
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Error parsing extracted logs: {e}")
-            parsing_result['parsing_errors'].append(f"General parsing error: {str(e)}")
-        
-        return parsing_result
-    
-    def _find_log_files(self, extract_dir: Path, extracted_files: List[str]) -> List[Path]:
-        """
-        Find log files in extracted archive.
-        
-        Args:
-            extract_dir: Directory containing extracted files
-            extracted_files: List of extracted file paths
-            
-        Returns:
-            List of log file paths
-        """
-        log_files = []
-        
-        try:
-            log_extensions = {'.txt', '.log', '.csv', '.json'}
-            log_keywords = ['password', 'login', 'credential', 'browser', 'cookie', 'history'}
-            
-            for file_path in extracted_files:
-                full_path = extract_dir / file_path
-                
-                if full_path.exists() and full_path.is_file():
-                    file_name_lower = full_path.name.lower()
-                    
-                    # Check extension
-                    if full_path.suffix.lower() in log_extensions:
-                        log_files.append(full_path)
-                        continue
-                    
-                    # Check filename for keywords
-                    if any(keyword in file_name_lower for keyword in log_keywords):
-                        log_files.append(full_path)
-                        continue
-            
-        except Exception as e:
-            self.logger.error(f"Error finding log files: {e}")
-        
-        return log_files
-    
-    def _parse_single_log_file(self, log_file: Path) -> Dict[str, Any]:
-        """
-        Parse a single log file for credentials.
-        
-        Args:
-            log_file: Path to log file
-            
-        Returns:
-            Dictionary with parsing results
-        """
-        result = {
-            'file_path': str(log_file),
-            'file_size': 0,
-            'credentials_count': 0,
-            'parsing_successful': False,
-            'file_type': 'unknown'
-        }
-        
-        try:
-            if not log_file.exists():
-                return result
-            
-            result['file_size'] = log_file.stat().st_size
-            
-            # Skip very large files
-            if result['file_size'] > self.config['max_extraction_size']:
-                self.logger.warning(f"Skipping large file: {log_file} ({result['file_size']} bytes)")
-                return result
-            
-            # Determine file type and parse accordingly
-            if log_file.suffix.lower() == '.json':
-                result['file_type'] = 'json'
-                credentials = self._parse_json_log(log_file)
-            elif log_file.suffix.lower() == '.csv':
-                result['file_type'] = 'csv'
-                credentials = self._parse_csv_log(log_file)
-            else:
-                result['file_type'] = 'text'
-                credentials = self._parse_text_log(log_file)
-            
-            result['credentials_count'] = len(credentials) if credentials else 0
-            result['parsing_successful'] = True
-            
-            if result['credentials_count'] > 0:
-                self.logger.info(f"Found {result['credentials_count']} credentials in {log_file}")
-            
-        except Exception as e:
-            self.logger.error(f"Error parsing log file {log_file}: {e}")
-        
-        return result
-    
-    def _parse_json_log(self, log_file: Path) -> List[Dict[str, str]]:
-        """Parse JSON log file for credentials."""
-        try:
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                data = json.load(f)
-            
-            # Basic credential extraction from JSON
-            # This can be expanded based on actual log formats
-            credentials = []
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict):
-                        if 'username' in item or 'password' in item or 'url' in item:
-                            credentials.append(item)
-            
-            return credentials
-            
-        except Exception as e:
-            self.logger.debug(f"Error parsing JSON log {log_file}: {e}")
-            return []
-    
-    def _parse_csv_log(self, log_file: Path) -> List[Dict[str, str]]:
-        """Parse CSV log file for credentials."""
-        try:
-            import csv
-            credentials = []
-            
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                # Try to detect delimiter
-                sample = f.read(1024)
-                f.seek(0)
-                
-                sniffer = csv.Sniffer()
-                delimiter = sniffer.sniff(sample).delimiter
-                
-                reader = csv.DictReader(f, delimiter=delimiter)
-                for row in reader:
-                    # Look for credential-like fields
-                    if any(field in row for field in ['username', 'password', 'url', 'login']):
-                        credentials.append(dict(row))
-            
-            return credentials
-            
-        except Exception as e:
-            self.logger.debug(f"Error parsing CSV log {log_file}: {e}")
-            return []
-    
-    def _parse_text_log(self, log_file: Path) -> List[Dict[str, str]]:
-        """Parse text log file for credentials."""
-        try:
-            credentials = []
-            
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            
-            # Simple regex patterns for common credential formats
-            patterns = [
-                r'(?i)username[:\s]+([^\r\n]+)',
-                r'(?i)password[:\s]+([^\r\n]+)',
-                r'(?i)url[:\s]+([^\r\n]+)',
-                r'(?i)email[:\s]+([^\r\n]+)',
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, content)
-                for match in matches:
-                    if match.strip():
-                        credentials.append({'value': match.strip(), 'type': 'extracted'})
-            
-            return credentials
-            
-        except Exception as e:
-            self.logger.debug(f"Error parsing text log {log_file}: {e}")
-            return []
-    
     def _cleanup_extraction_dir(self, extract_dir: Path) -> None:
         """
         Clean up extraction directory.
@@ -571,6 +412,9 @@ class BoxedPwWorkflow:
             'base_download_dir': str(self.base_download_dir),
             'password_extractor_ready': self.password_extractor is not None,
             'archive_decompressor_ready': self.archive_decompressor is not None,
+            'log_parser_ready': self.log_parser is not None,
+            'elasticsearch_client_ready': self.elasticsearch_client is not None,
+            'elasticsearch_enabled': self.elasticsearch_client.is_enabled() if self.elasticsearch_client else False,
             'config': self.config.copy()
         }
 
