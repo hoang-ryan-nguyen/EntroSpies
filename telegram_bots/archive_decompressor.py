@@ -56,7 +56,7 @@ class ArchiveDecompressor:
             '.arj', '.lzh', '.lha', '.chm', '.nsis', '.udf', '.vhd', '.vhdx'
         }
         
-        self.logger.info(f"Archive decompressor initialized with 7z at: {self.sevenzip_path}")
+        self.logger.debug(f"Archive decompressor initialized with 7z at: {self.sevenzip_path}")
     
     def test_7z_binary(self) -> bool:
         """
@@ -74,7 +74,6 @@ class ArchiveDecompressor:
             )
             
             if result.returncode == 0:
-                self.logger.info("7z binary test successful")
                 return True
             else:
                 self.logger.error(f"7z binary test failed with return code: {result.returncode}")
@@ -165,7 +164,6 @@ class ArchiveDecompressor:
                         if filename and not filename.endswith('/'):  # Skip directories
                             files.append(filename)
             
-            self.logger.info(f"Found {len(files)} files in archive: {archive_path}")
             return files
             
         except subprocess.TimeoutExpired:
@@ -227,7 +225,6 @@ class ArchiveDecompressor:
             cmd.append('-y')  # Yes to all prompts
         
         try:
-            self.logger.info(f"Extracting {archive_path} to {final_extract_dir}")
             start_time = time.time()
             
             result = subprocess.run(
@@ -248,7 +245,7 @@ class ArchiveDecompressor:
                             rel_path = os.path.relpath(os.path.join(root, file), final_extract_dir)
                             extracted_files.append(rel_path)
                 
-                self.logger.info(f"Successfully extracted {len(extracted_files)} files in {extraction_time:.2f}s")
+                self.logger.info(f"Archive extracted: {len(extracted_files)} files in {extraction_time:.2f}s")
                 return True, extracted_files
             else:
                 self.logger.error(f"Extraction failed with return code {result.returncode}")
@@ -288,7 +285,6 @@ class ArchiveDecompressor:
             cmd.extend(['-p' + password])
         
         try:
-            self.logger.debug(f"Testing archive integrity: {archive_path}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,

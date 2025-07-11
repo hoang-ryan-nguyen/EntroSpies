@@ -63,9 +63,9 @@ class InfostealerElasticsearchClient:
         self.failed_uploads = 0
         self.duplicate_skipped = 0
         
-        self.logger.info(f"Infostealer Elasticsearch client initialized (enabled: {self.enabled})")
+        self.logger.debug(f"Infostealer Elasticsearch client initialized (enabled: {self.enabled})")
         if self.enabled:
-            self.logger.info(f"ES URL: {self.elasticsearch_url}, Index: {self.index_name}, Parser: {self.parser_version}")
+            self.logger.debug(f"ES URL: {self.elasticsearch_url}, Index: {self.index_name}, Parser: {self.parser_version}")
     
     def is_enabled(self) -> bool:
         """Check if Elasticsearch integration is enabled."""
@@ -98,7 +98,7 @@ class InfostealerElasticsearchClient:
             # Test connection
             if self.es_client.ping():
                 self.connected = True
-                self.logger.info(f"Successfully connected to Elasticsearch at {self.elasticsearch_url}")
+                self.logger.debug(f"Connected to Elasticsearch at {self.elasticsearch_url}")
                 return True
             else:
                 self.logger.error("Failed to ping Elasticsearch server")
@@ -126,7 +126,7 @@ class InfostealerElasticsearchClient:
             # Check if index exists
             if self.es_client.indices.exists(index=self.index_name):
                 self.index_exists = True
-                self.logger.info(f"Index '{self.index_name}' already exists. Using existing index.")
+                self.logger.debug(f"Index '{self.index_name}' already exists")
                 return True
             
             # Create index with flexible mapping for any infostealer format
@@ -251,7 +251,6 @@ class InfostealerElasticsearchClient:
             Dictionary with upload statistics
         """
         if not self.enabled:
-            self.logger.info("Elasticsearch integration is disabled, skipping upload")
             return {
                 'uploaded': 0,
                 'duplicates_skipped': 0,
@@ -280,7 +279,6 @@ class InfostealerElasticsearchClient:
                 # Check if document already exists
                 if self.check_document_exists(document_id):
                     duplicate_count += 1
-                    self.logger.debug(f"Skipping duplicate credential: {credential.get('username', 'unknown')}@{credential.get('url', 'unknown')} [{credential.get('country_code', 'unknown')}]")
                     continue
                 
                 # Add metadata
@@ -297,10 +295,8 @@ class InfostealerElasticsearchClient:
                 
                 if response.get('result') in ['created', 'updated']:
                     success_count += 1
-                    self.logger.debug(f"Successfully indexed credential: {credential.get('username', 'unknown')}@{credential.get('url', 'unknown')} [{credential.get('country_code', 'unknown')}]")
                 else:
                     failure_count += 1
-                    self.logger.warning(f"Unexpected response: {response}")
                     
             except Exception as e:
                 failure_count += 1
@@ -318,7 +314,7 @@ class InfostealerElasticsearchClient:
             'total_processed': len(credentials)
         }
         
-        self.logger.info(f"Elasticsearch upload completed: {success_count} uploaded, {duplicate_count} duplicates skipped, {failure_count} errors")
+        self.logger.info(f"Elasticsearch upload: {success_count}/{len(credentials)} credentials uploaded successfully")
         
         return result
     
