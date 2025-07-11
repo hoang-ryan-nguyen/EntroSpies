@@ -483,7 +483,7 @@ def generate_content_hash(message_text, media_type=None, media_size=None):
     if media_type:
         content_parts.append(f"media_type:{media_type}")
     
-    if media_size:
+    if media_size and media_size > 0:
         # Round media size to nearest KB to handle small variations
         size_kb = round(media_size / 1024)
         content_parts.append(f"media_size_kb:{size_kb}")
@@ -528,8 +528,14 @@ def find_content_duplicate(message_text, media_type, media_size, channel_info, d
                     with open(message_file, 'r', encoding='utf-8') as f:
                         existing_data = json.load(f)
                     
+                    existing_msg_id = existing_data.get('message_id')
+                    
                     # Skip if it's the same message ID (already handled by ID-based detection)
-                    if str(existing_data.get('message_id')) in message_file.name:
+                    # Handle multiple filename patterns used by the system
+                    if existing_msg_id and (
+                        f"_msg_{existing_msg_id}_" in message_file.name or
+                        message_file.name.startswith(f"{existing_msg_id}_message.json")
+                    ):
                         continue
                     
                     # Generate hash for existing message
@@ -541,30 +547,27 @@ def find_content_duplicate(message_text, media_type, media_size, channel_info, d
                     
                     # Check for exact content match
                     if new_hash == existing_hash:
-                        existing_msg_id = existing_data.get('message_id')
                         return True, existing_msg_id, f"Exact content match (hash: {new_hash[:12]}...)"
                     
-                    # Check for text similarity (if both have meaningful text)
+                    # Additional check for text-only messages with similar content but different media
+                    # This catches cases where media metadata differs but text content is identical
                     if message_text and existing_text:
                         normalized_new = normalize_message_text(message_text)
                         normalized_existing = normalize_message_text(existing_text)
                         
-                        # Check if normalized texts are identical
-                        if normalized_new and normalized_existing and normalized_new == normalized_existing:
-                            # Also check media similarity
-                            media_similar = False
-                            if not media_type and not existing_media_type:
-                                media_similar = True  # Both text-only
-                            elif media_type and existing_media_type:
-                                # Same media type and similar size (within 5%)
-                                if (media_type == existing_media_type and 
-                                    media_size and existing_media_size and
-                                    abs(media_size - existing_media_size) / max(media_size, existing_media_size) <= 0.05):
-                                    media_similar = True
+                        # Only check if normalized texts are identical AND hashes differ
+                        # This happens when media info differs but text content is same
+                        if (normalized_new and normalized_existing and 
+                            normalized_new == normalized_existing and 
+                            new_hash != existing_hash):
                             
-                            if media_similar:
-                                existing_msg_id = existing_data.get('message_id')
-                                return True, existing_msg_id, f"Identical normalized text + similar media"
+                            # Check if it's a text-only vs media message scenario
+                            if not media_type and existing_media_type:
+                                return True, existing_msg_id, f"Text content match (text-only vs media message)"
+                            elif media_type and not existing_media_type:
+                                return True, existing_msg_id, f"Text content match (media vs text-only message)"
+                            elif media_type and existing_media_type and media_type != existing_media_type:
+                                return True, existing_msg_id, f"Text content match (different media types: {media_type} vs {existing_media_type})"
                     
                 except Exception as e:
                     # Skip files that can't be read
@@ -745,10 +748,11 @@ async def setup_message_listener(client, channels, download_manager, workflow_or
             logger.info(f"New message received from {channel_info['title']}: ID={message.id}")
             compliance_logger.info(f"REALTIME_MESSAGE: Channel={channel_info['title']}, MessageID={message.id}, Date={message.date}")
             
-            # Check if message already downloaded (enhanced with content checking)
+            # Extract media information once for both duplicate checking and processing
             media_type = type(message.media).__name__ if message.media else None
             media_size = get_media_size(message) if message.media else None
             
+            # Check if message already downloaded (enhanced with content checking)
             is_duplicate, duplicate_reason = is_message_already_downloaded_enhanced(
                 channel_info, message.id, message.text or '', media_type, media_size, args.output
             )
@@ -764,24 +768,24 @@ async def setup_message_listener(client, channels, download_manager, workflow_or
                 'message_id': message.id,
                 'date': message.date.isoformat(),
                 'text': message.text or '',
-                'media_type': None,
+                'media_type': media_type,
                 'has_media': bool(message.media),
                 'downloaded_files': [],
                 'parser': channel_info.get('parser', '')
             }
             
-            # Handle media downloads
-            if message.media and not args.dry_run:
-                media_type = type(message.media).__name__
-                media_size = get_media_size(message)
-                message_data['media_type'] = media_type
+            # Add media size info if available
+            if media_size:
                 message_data['media_size'] = media_size
                 message_data['media_size_formatted'] = format_file_size(media_size)
+            
+            # Handle media downloads
+            if message.media and not args.dry_run:
                 
-                logger.info(f"Processing media: {media_type}, Size: {format_file_size(media_size)}")
+                logger.info(f"Processing media: {media_type}, Size: {format_file_size(media_size) if media_size else 'Unknown'}")
                 
                 # Check size limits
-                if args.max_file_size_bytes and media_size > args.max_file_size_bytes:
+                if args.max_file_size_bytes and media_size and media_size > args.max_file_size_bytes:
                     logger.warning(f"File too large ({format_file_size(media_size)}), skipping download")
                     message_data['download_skipped'] = True
                     message_data['skip_reason'] = f"File too large ({format_file_size(media_size)})"
@@ -860,10 +864,17 @@ async def get_messages_from_channel(client, channel_info, download_manager, args
             
             compliance_logger.info(f"MESSAGE_COLLECTED: Channel={channel_info['title']}, MessageID={message.id}, Date={message.date}")
             
-            # Check if message already downloaded (enhanced with content checking)
+            # Extract media information once for both duplicate checking and download processing
             media_type = type(message.media).__name__ if message.media else None
             media_size = get_media_size(message) if message.media else None
             
+            # Store media info in message_data for consistency
+            if media_type:
+                message_data['media_type'] = media_type
+                message_data['media_size'] = media_size
+                message_data['media_size_formatted'] = format_file_size(media_size)
+            
+            # Check if message already downloaded (enhanced with content checking)
             is_duplicate, duplicate_reason = is_message_already_downloaded_enhanced(
                 channel_info, message.id, message.text or '', media_type, media_size, args.output
             )
@@ -878,11 +889,6 @@ async def get_messages_from_channel(client, channel_info, download_manager, args
             
             # Check for media and queue downloads
             if message.media and not args.dry_run:
-                media_type = type(message.media).__name__
-                media_size = get_media_size(message)
-                message_data['media_type'] = media_type
-                message_data['media_size'] = media_size
-                message_data['media_size_formatted'] = format_file_size(media_size)
                 
                 logger.info(f"Message has media: {media_type}, Size: {format_file_size(media_size)}")
                 compliance_logger.info(f"MEDIA_DETECTED: Type={media_type}, Size={media_size}, MessageID={message.id}")
