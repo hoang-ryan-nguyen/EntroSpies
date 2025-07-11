@@ -12,7 +12,14 @@ import csv
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
-from parsing_failure_logger import ParsingFailureLogger
+try:
+    from parsing_failure_logger import ParsingFailureLogger
+except ImportError:
+    # Try importing from project root
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from parsing_failure_logger import ParsingFailureLogger
 
 
 class BoxedPwLogParser:
@@ -44,6 +51,7 @@ class BoxedPwLogParser:
     def find_log_files(self, extract_dir: Path, extracted_files: List[str]) -> List[Path]:
         """
         Find log files in extracted archive.
+        Includes traditional log files and credential dump files.
         
         Args:
             extract_dir: Directory containing extracted files
@@ -70,6 +78,11 @@ class BoxedPwLogParser:
                     if any(keyword in file_name_lower for keyword in self.log_keywords):
                         log_files.append(full_path)
                         continue
+                    
+                    # Check for credential dump files (like STARLINK file)
+                    if self._is_credential_dump_file(full_path):
+                        log_files.append(full_path)
+                        continue
             
             self.logger.info(f"Found {len(log_files)} log files to parse")
             
@@ -77,6 +90,62 @@ class BoxedPwLogParser:
             self.logger.error(f"Error finding log files: {e}")
         
         return log_files
+    
+    def _is_credential_dump_file(self, file_path: Path) -> bool:
+        """
+        Check if a file appears to be a credential dump file.
+        
+        Args:
+            file_path: Path to file to check
+            
+        Returns:
+            True if file appears to be a credential dump
+        """
+        try:
+            file_name_lower = file_path.name.lower()
+            
+            # Check for common credential dump file patterns
+            credential_indicators = [
+                'starlink', 'combo', 'combolist', 'leak', 'breach', 'dump', 'creds', 'credentials',
+                'passwords', 'logins', 'accounts', 'database', 'db', 'stealer', 'logs',
+                'redline', 'vidar', 'raccoon', 'azorult', 'lokibot', 'formbook'
+            ]
+            
+            # Check filename for credential indicators
+            if any(indicator in file_name_lower for indicator in credential_indicators):
+                # Additional check: peek at file content to confirm it contains credential-like data
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        sample_content = f.read(2048)  # Read first 2KB
+                    
+                    # Look for patterns that suggest credentials
+                    lines = sample_content.split('\n')[:20]  # Check first 20 lines
+                    credential_lines = 0
+                    
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        
+                        # Count lines that look like credentials
+                        colon_count = line.count(':')
+                        if colon_count >= 2:
+                            credential_lines += 1
+                    
+                    # If more than 20% of sample lines look like credentials, consider it a credential dump
+                    if credential_lines > 0 and credential_lines / len(lines) > 0.2:
+                        self.logger.debug(f"Detected credential dump file: {file_path.name}")
+                        return True
+                        
+                except Exception:
+                    # If we can't read the file, fall back to filename-based detection
+                    pass
+            
+            return False
+            
+        except Exception as e:
+            self.logger.debug(f"Error checking credential dump file {file_path}: {e}")
+            return False
     
     def parse_single_log_file(self, log_file: Path, message_file_path: Optional[str] = None,
                              channel_name: Optional[str] = None, message_id: Optional[int] = None) -> Dict[str, Any]:
@@ -356,6 +425,7 @@ class BoxedPwLogParser:
     def parse_credentials_file(self, credential_file: Path) -> List[Dict[str, str]]:
         """
         Parse a credential file for individual credentials.
+        Supports both traditional format (SOFT:/URL:/USER:/PASS:) and colon-separated format (url:username:password).
         
         Args:
             credential_file: Path to credential file
@@ -378,29 +448,14 @@ class BoxedPwLogParser:
             # Extract country code from folder path
             country_code = self.extract_country_code(str(credential_file))
             
-            # Split by double newlines to separate credential entries
-            entries = content.split('\n\n')
-            
-            for entry in entries:
-                if not entry.strip():
-                    continue
-                    
-                credential = {}
-                lines = entry.strip().split('\n')
+            # Determine file format and parse accordingly
+            if self._is_colon_separated_format(content):
+                # Parse colon-separated format (url:username:password)
+                self.logger.debug(f"Parsing {credential_file.name} as colon-separated credentials")
+                colon_credentials = self._parse_colon_separated_credentials(content)
                 
-                for line in lines:
-                    line = line.strip()
-                    if line.startswith('SOFT:'):
-                        credential['software'] = line[5:].strip()
-                    elif line.startswith('URL:'):
-                        credential['url'] = line[4:].strip()
-                    elif line.startswith('USER:'):
-                        credential['username'] = line[5:].strip()
-                    elif line.startswith('PASS:'):
-                        credential['password'] = line[5:].strip()
-                
-                # Only add if we have all required fields
-                if all(key in credential for key in ['software', 'url', 'username', 'password']):
+                # Add metadata to each credential
+                for credential in colon_credentials:
                     credential['timestamp'] = file_timestamp
                     credential['source_file'] = str(credential_file)
                     credential['channel'] = channel_info['channel_name']
@@ -410,9 +465,120 @@ class BoxedPwLogParser:
                     credential['country_code'] = country_code
                     credentials.append(credential)
                     
+            else:
+                # Parse traditional format (SOFT:/URL:/USER:/PASS:)
+                self.logger.debug(f"Parsing {credential_file.name} as traditional credentials")
+                credentials.extend(self._parse_traditional_credentials(content, file_timestamp, channel_info, country_code, credential_file))
+                    
         except Exception as e:
             self.logger.error(f"Error parsing credential file {credential_file}: {e}")
             
+        return credentials
+    
+    def _is_colon_separated_format(self, content: str) -> bool:
+        """
+        Determine if the content is in colon-separated format.
+        
+        Args:
+            content: File content to analyze
+            
+        Returns:
+            True if content appears to be colon-separated credentials
+        """
+        lines = content.strip().split('\n')
+        
+        # Count lines that look like colon-separated credentials
+        colon_lines = 0
+        traditional_lines = 0
+        total_lines = 0
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('//') or line.startswith('-'):
+                continue
+                
+            # Skip header/banner lines
+            if any(keyword in line.lower() for keyword in ['join telegram', 'clouds', 'url:login:pass', 'logs']):
+                continue
+            
+            # Skip starlink banner lines but not actual credential lines
+            if 'starlink' in line.lower() and ('telegram' in line.lower() or 'join' in line.lower() or line.startswith('|')):
+                continue
+            
+            total_lines += 1
+            
+            # Check for traditional format indicators
+            if any(line.startswith(prefix) for prefix in ['SOFT:', 'URL:', 'USER:', 'PASS:']):
+                traditional_lines += 1
+                continue
+            
+            # Check for colon-separated format
+            colon_count = line.count(':')
+            if colon_count >= 2:
+                # Simple heuristic: if it has >= 2 colons and doesn't look like traditional format
+                colon_lines += 1
+        
+        if total_lines == 0:
+            return False
+        
+        # If more than 50% of lines look like colon-separated, assume that format
+        colon_ratio = colon_lines / total_lines
+        traditional_ratio = traditional_lines / total_lines
+        
+        self.logger.debug(f"Format detection: {colon_lines} colon-separated lines, {traditional_lines} traditional lines, {total_lines} total lines")
+        
+        return colon_ratio > 0.5 and colon_ratio > traditional_ratio
+    
+    def _parse_traditional_credentials(self, content: str, file_timestamp: str, channel_info: Dict[str, str], 
+                                     country_code: str, credential_file: Path) -> List[Dict[str, str]]:
+        """
+        Parse traditional format credentials (SOFT:/URL:/USER:/PASS:).
+        
+        Args:
+            content: File content
+            file_timestamp: File timestamp
+            channel_info: Channel information
+            country_code: Country code
+            credential_file: Path to credential file
+            
+        Returns:
+            List of parsed credential dictionaries
+        """
+        credentials = []
+        
+        # Split by double newlines to separate credential entries
+        entries = content.split('\n\n')
+        
+        for entry in entries:
+            if not entry.strip():
+                continue
+                
+            credential = {}
+            lines = entry.strip().split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if line.startswith('SOFT:'):
+                    credential['software'] = line[5:].strip()
+                elif line.startswith('URL:'):
+                    credential['url'] = line[4:].strip()
+                elif line.startswith('USER:'):
+                    credential['username'] = line[5:].strip()
+                elif line.startswith('PASS:'):
+                    credential['password'] = line[5:].strip()
+            
+            # Only add if we have all required fields
+            if all(key in credential for key in ['software', 'url', 'username', 'password']):
+                credential['timestamp'] = file_timestamp
+                credential['source_file'] = str(credential_file)
+                credential['channel'] = channel_info['channel_name']
+                credential['channel_username'] = channel_info['channel_username']
+                credential['channel_id'] = channel_info['channel_id']
+                credential['message_id'] = channel_info['message_id']
+                credential['country_code'] = country_code
+                credential['format'] = 'traditional'
+                credentials.append(credential)
+        
         return credentials
     
     def parse_all_credential_files(self, extract_dir: Path, extracted_files: List[str]) -> Dict[str, Any]:
@@ -534,6 +700,156 @@ class BoxedPwLogParser:
             self.logger.debug(f"Error parsing CSV log {log_file}: {e}")
             return []
     
+    def _parse_colon_separated_credentials(self, content: str) -> List[Dict[str, str]]:
+        """
+        Parse credentials in format: url:username:password
+        Handles various URL formats including those with protocols and ports.
+        
+        Args:
+            content: File content to parse
+            
+        Returns:
+            List of credential dictionaries
+        """
+        credentials = []
+        
+        try:
+            lines = content.split('\n')
+            
+            for line_num, line in enumerate(lines, 1):
+                line = line.strip()
+                
+                # Skip empty lines, comments, and header lines
+                if not line or line.startswith('#') or line.startswith('//') or line.startswith('-'):
+                    continue
+                
+                # Skip obvious header/banner lines  
+                if any(keyword in line.lower() for keyword in ['join telegram', 'clouds', 'url:login:pass', 'logs']):
+                    continue
+                
+                # Skip starlink banner lines but not actual credential lines
+                if 'starlink' in line.lower() and ('telegram' in line.lower() or 'join' in line.lower() or line.startswith('|')):
+                    continue
+                
+                # Count colons to determine if this might be a credential line
+                colon_count = line.count(':')
+                
+                # We need at least 2 colons for url:username:password
+                # But handle cases where URL has protocol (https://) or port (:8080)
+                if colon_count < 2:
+                    continue
+                
+                # Try to parse as colon-separated credential
+                credential = self._parse_single_colon_credential(line, line_num)
+                if credential:
+                    credentials.append(credential)
+            
+            self.logger.debug(f"Parsed {len(credentials)} colon-separated credentials")
+            return credentials
+            
+        except Exception as e:
+            self.logger.debug(f"Error parsing colon-separated credentials: {e}")
+            return []
+    
+    def _parse_single_colon_credential(self, line: str, line_num: int) -> Optional[Dict[str, str]]:
+        """
+        Parse a single line containing colon-separated credentials.
+        Handles complex cases with URLs containing colons.
+        
+        Args:
+            line: Single line to parse
+            line_num: Line number for debugging
+            
+        Returns:
+            Credential dictionary or None if parsing failed
+        """
+        try:
+            # Handle different URL formats
+            # Pattern 1: https://domain.com:port/path:username:password
+            # Pattern 2: domain.com:username:password
+            # Pattern 3: subdomain.domain.com:username:password
+            
+            # First, try to identify if line starts with a protocol
+            if line.startswith(('http://', 'https://', 'ftp://', 'ftps://')):
+                # Handle URLs with protocols
+                # Split by '://' first to separate protocol
+                protocol_split = line.split('://', 1)
+                if len(protocol_split) != 2:
+                    return None
+                
+                protocol = protocol_split[0]
+                remainder = protocol_split[1]
+                
+                # Now find the last two colons for username:password
+                colon_positions = [i for i, char in enumerate(remainder) if char == ':']
+                
+                if len(colon_positions) < 2:
+                    return None
+                
+                # Take the last two colons as separators
+                username_colon = colon_positions[-2]
+                password_colon = colon_positions[-1]
+                
+                url_part = remainder[:username_colon]
+                username = remainder[username_colon + 1:password_colon]
+                password = remainder[password_colon + 1:]
+                
+                # Reconstruct full URL
+                full_url = f"{protocol}://{url_part}"
+                
+            else:
+                # Handle simple domain:username:password format
+                parts = line.split(':')
+                
+                if len(parts) < 3:
+                    return None
+                
+                # For simple cases, assume last two parts are username:password
+                # Everything before that is the URL/domain
+                url_parts = parts[:-2]
+                username = parts[-2]
+                password = parts[-1]
+                
+                full_url = ':'.join(url_parts)
+            
+            # Validate components
+            if not full_url or not username or not password:
+                return None
+            
+            # Clean up components
+            full_url = full_url.strip()
+            username = username.strip()
+            password = password.strip()
+            
+            # Additional validation
+            if len(username) < 1 or len(password) < 1:
+                return None
+            
+            # Skip obvious false positives
+            if any(fp in username.lower() for fp in ['username', 'user', 'login', 'email']):
+                return None
+            
+            if any(fp in password.lower() for fp in ['password', 'pass', 'pwd']):
+                return None
+            
+            # Create credential dictionary
+            credential = {
+                'url': full_url,
+                'username': username,
+                'password': password,
+                'software': 'web_browser',  # Default software type
+                'line_number': line_num,
+                'format': 'colon_separated',
+                'raw_line': line
+            }
+            
+            self.logger.debug(f"Parsed colon-separated credential: {full_url} | {username}")
+            return credential
+            
+        except Exception as e:
+            self.logger.debug(f"Error parsing line {line_num}: {e}")
+            return None
+    
     def _parse_text_log(self, log_file: Path) -> List[Dict[str, str]]:
         """Parse text log file for credentials."""
         try:
@@ -542,7 +858,12 @@ class BoxedPwLogParser:
             with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
             
-            # Simple regex patterns for common credential formats
+            # First, try to parse colon-separated credentials (url:username:password)
+            colon_separated_credentials = self._parse_colon_separated_credentials(content)
+            if colon_separated_credentials:
+                credentials.extend(colon_separated_credentials)
+            
+            # Then, try simple regex patterns for common credential formats
             patterns = [
                 r'(?i)username[:\s]+([^\r\n]+)',
                 r'(?i)password[:\s]+([^\r\n]+)',
