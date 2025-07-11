@@ -281,7 +281,8 @@ class TelethonDownloadManager:
                     # Rate limiting
                     await asyncio.sleep(self.rate_limit)
                     
-                    # Perform download using telethon
+                    # Perform download using telethon with message ID tracking
+                    task.logger.debug(f"Starting download for message ID {task.message.id}")
                     result = await self._download_media_telethon(
                         task.client, 
                         task.message, 
@@ -301,6 +302,9 @@ class TelethonDownloadManager:
                         self.download_results[download_id] = result
                         self.progress_monitor.update_download_progress(download_id, "completed", 100.0)
                         self.progress_monitor.completed_downloads += 1
+                        
+                        # Log successful message-file pairing
+                        task.logger.info(f"Message-file pair completed: Message ID {task.message.id} -> {os.path.basename(result['file_path'])}")
                         
                         # Queue for workflow processing if orchestrator is available
                         if self.workflow_orchestrator and result.get('file_path'):
@@ -351,14 +355,18 @@ class TelethonDownloadManager:
                     'file_size': file_size,
                     'download_duration': download_duration,
                     'message_text_path': message_text_path,
-                    'message_attachment_paired': True
+                    'message_attachment_paired': True,
+                    'message_id': message.id,
+                    'message_date': message.date.isoformat()
                 }
             else:
                 return {
                     'file_path': None,
                     'message_text_path': message_text_path,
                     'download_failed': True,
-                    'message_attachment_paired': False
+                    'message_attachment_paired': False,
+                    'message_id': message.id,
+                    'message_date': message.date.isoformat()
                 }
                 
         except Exception as e:
@@ -366,20 +374,25 @@ class TelethonDownloadManager:
             return None
     
     async def _store_message_text_fast(self, message, channel_info, download_path):
-        """Fast message storage with minimal data."""
+        """Fast message storage with minimal data and unique naming."""
         try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            message_filename = f"{timestamp}_msg_{message.id}_message.json"
+            # Use message date + message ID for unique, deterministic filename
+            # This prevents race conditions and ensures one-to-one message-file mapping
+            msg_date = message.date.strftime('%Y%m%d_%H%M%S')
+            message_filename = f"{msg_date}_msg_{message.id}_message.json"
             message_file_path = os.path.join(download_path, message_filename)
             
-            # Minimal message data for speed
+            # Minimal message data for speed with enhanced traceability
             message_data = {
                 'channel': channel_info['title'],
+                'channel_id': channel_info['id'],
                 'message_id': message.id,
                 'date': message.date.isoformat(),
                 'text': message.text or '',
                 'has_media': bool(message.media),
-                'parser': channel_info.get('parser', '')
+                'parser': channel_info.get('parser', ''),
+                'download_id': f"{channel_info['id']}_{message.id}",
+                'filename_timestamp': msg_date
             }
             
             with open(message_file_path, 'w', encoding='utf-8') as f:
