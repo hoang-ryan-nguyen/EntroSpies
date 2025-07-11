@@ -23,6 +23,9 @@ def test_starlink_parsing():
     # Test file path - use smaller sample
     starlink_file = Path("/Users/MAC/Projects/EntroSpies/telegram_bots/test_starlink_sample.txt")
     
+    # Test both URL credential file and non-URL file
+    non_url_file = Path("/Users/MAC/Projects/EntroSpies/telegram_bots/test_non_url_sample.txt")
+    
     if not starlink_file.exists():
         print(f"Error: Starlink file not found: {starlink_file}")
         return
@@ -33,6 +36,10 @@ def test_starlink_parsing():
     # Test if it's detected as credential dump file
     is_credential_dump = parser._is_credential_dump_file(starlink_file)
     print(f"Detected as credential dump: {is_credential_dump}")
+    
+    # Test URL credential pattern detection specifically
+    is_url_pattern = parser._detect_url_credential_pattern(starlink_file)
+    print(f"Detected URL credential pattern: {is_url_pattern}")
     
     # Test parsing as single log file
     result = parser.parse_single_log_file(starlink_file)
@@ -53,6 +60,22 @@ def test_starlink_parsing():
             print(f"      Password: {cred.get('password', 'N/A')}")
             print(f"      Format: {cred.get('format', 'N/A')}")
             print()
+    
+    # Test non-URL credential file
+    print(f"\n{'='*50}")
+    print("Testing non-URL credential file...")
+    print(f"{'='*50}")
+    
+    if non_url_file.exists():
+        print(f"Testing non-URL file: {non_url_file}")
+        
+        # Test URL credential pattern detection
+        is_url_pattern_non = parser._detect_url_credential_pattern(non_url_file)
+        print(f"Detected URL credential pattern: {is_url_pattern_non}")
+        
+        # Test general credential dump detection
+        is_credential_dump_non = parser._is_credential_dump_file(non_url_file)
+        print(f"Detected as credential dump: {is_credential_dump_non}")
 
 if __name__ == "__main__":
     test_starlink_parsing()

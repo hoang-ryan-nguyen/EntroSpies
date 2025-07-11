@@ -106,10 +106,14 @@ class BoxedPwLogParser:
             
             # Check for common credential dump file patterns
             credential_indicators = [
-                'starlink', 'combo', 'combolist', 'leak', 'breach', 'dump', 'creds', 'credentials',
+                'combo', 'combolist', 'leak', 'breach', 'dump', 'creds', 'credentials',
                 'passwords', 'logins', 'accounts', 'database', 'db', 'stealer', 'logs',
                 'redline', 'vidar', 'raccoon', 'azorult', 'lokibot', 'formbook'
             ]
+            
+            # First, check for specific URL:username:password pattern
+            if self._detect_url_credential_pattern(file_path):
+                return True
             
             # Check filename for credential indicators
             if any(indicator in file_name_lower for indicator in credential_indicators):
@@ -145,6 +149,61 @@ class BoxedPwLogParser:
             
         except Exception as e:
             self.logger.debug(f"Error checking credential dump file {file_path}: {e}")
+            return False
+    
+    def _detect_url_credential_pattern(self, file_path: Path) -> bool:
+        """
+        Detect if a file contains URL:username:password credential pattern.
+        
+        Args:
+            file_path: Path to file to check
+            
+        Returns:
+            True if file contains URL:username:password pattern
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                sample_content = f.read(4096)  # Read first 4KB for pattern detection
+            
+            lines = sample_content.split('\n')[:50]  # Check first 50 lines
+            url_credential_lines = 0
+            total_valid_lines = 0
+            
+            # Regex pattern for URL:username:password format
+            # Matches: domain.com:user:pass, https://domain.com:user:pass, etc.
+            url_pattern = re.compile(r'^(https?://)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/[^:]*)?:[^:\s]+:[^:\s]+$')
+            
+            for line in lines:
+                line = line.strip()
+                
+                # Skip empty lines and obvious headers/banners
+                if not line or line.startswith(('#', '//', '-', '|')):
+                    continue
+                
+                # Skip banner lines
+                if any(keyword in line.lower() for keyword in ['join telegram', 'clouds', 'url:login:pass', 'logs']):
+                    continue
+                
+                # Skip lines that are clearly banners (contain multiple special chars)
+                if line.count('|') > 2 or line.count('-') > 10 or line.count('=') > 5:
+                    continue
+                
+                total_valid_lines += 1
+                
+                # Check if line matches URL:username:password pattern
+                if url_pattern.match(line):
+                    url_credential_lines += 1
+                    self.logger.debug(f"Detected URL credential pattern: {line[:50]}...")
+            
+            # If more than 30% of valid lines match the pattern, consider it a URL credential file
+            if total_valid_lines > 0 and url_credential_lines / total_valid_lines > 0.3:
+                self.logger.debug(f"Detected URL credential file: {file_path.name} ({url_credential_lines}/{total_valid_lines} lines)")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.logger.debug(f"Error detecting URL credential pattern in {file_path}: {e}")
             return False
     
     def parse_single_log_file(self, log_file: Path, message_file_path: Optional[str] = None,

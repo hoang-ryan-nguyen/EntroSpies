@@ -1,0 +1,9 @@
+Some random text file
+This is not a credential file
+It contains some colons: like this: and this:
+But not in the URL:username:password format
+Traditional format might look like:
+SOFT: Firefox Browser
+URL: https://example.com
+USER: testuser
+PASS: testpass123
