@@ -54,6 +54,6 @@ HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
 
 # Default command with proper session and config (real-time listening mode)
 CMD ["python3", "telegram_bots/infostealer_bot.py", \
-     "-s", "telegram_bots/session/qualgolab_telegram.session", \
+     "-s", "session/qualgolab_telegram.session", \
      "-c", "config/channel_list.json", \
      "-v"]

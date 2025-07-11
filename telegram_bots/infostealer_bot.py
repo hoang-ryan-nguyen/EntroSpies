@@ -26,6 +26,7 @@ DEFAULT_SESSION = os.getenv('SESSION_NAME', 'entrospies_session')
 DEFAULT_CONFIG = os.getenv('CONFIG_FILE', 'config/channel_list.json')
 DEFAULT_OUTPUT_DIR = os.getenv('DOWNLOAD_DIR', 'download')
 DEFAULT_LOGS_DIR = os.getenv('LOGS_DIR', 'logs')
+DEFAULT_SESSION_DIR = os.getenv('SESSION_DIR', 'session')
 DEFAULT_MESSAGES = int(os.getenv('DEFAULT_MESSAGES', 1))
 DEFAULT_MAX_FILE_SIZE = int(os.getenv('DEFAULT_MAX_FILE_SIZE', 1024 * 1024 * 1024))  # 1GB
 
@@ -222,7 +223,7 @@ def check_session_files(session_path):
         return session_path
     
     # If no specific session provided, check the default session directory
-    session_dir = 'session'
+    session_dir = DEFAULT_SESSION_DIR
     if not os.path.exists(session_dir):
         print(f"Error: Session directory does not exist: {session_dir}")
         sys.exit(1)
