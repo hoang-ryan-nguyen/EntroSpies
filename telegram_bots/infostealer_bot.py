@@ -342,7 +342,7 @@ def sanitize_filename(filename):
     return filename[:50]  # Limit length
 
 def is_message_already_downloaded(channel_info, message_id, download_dir):
-    """Check if message is already downloaded by looking for existing JSON file and attachments."""
+    """Check if message is already downloaded by looking for individual message folder structure."""
     try:
         channel_dir = sanitize_filename(channel_info['title'])
         # Check multiple possible date folders (current and recent days)
@@ -351,37 +351,68 @@ def is_message_already_downloaded(channel_info, message_id, download_dir):
         if not base_path.exists():
             return False
         
-        # Look for message JSON file in any date folder
+        # Look for individual message folder in any date folder
         for date_folder in base_path.iterdir():
             if date_folder.is_dir():
+                # Check for individual message folder
+                message_folder = date_folder / f"msg_{message_id}"
+                if message_folder.exists() and message_folder.is_dir():
+                    # Check if message.json exists
+                    message_file = message_folder / "message.json"
+                    if message_file.exists():
+                        # Check if password.json exists (should always exist in new structure)
+                        password_file = message_folder / "password.json"
+                        
+                        # Look for attachment files in message folder
+                        attachment_files = []
+                        for file in message_folder.iterdir():
+                            if file.is_file() and not file.name.endswith('.json'):
+                                attachment_files.append(file)
+                        
+                        # If we found attachment files, consider it fully downloaded
+                        if attachment_files:
+                            return True
+                        
+                        # If no attachments found, check the JSON file to see if message had media
+                        try:
+                            with open(message_file, 'r', encoding='utf-8') as f:
+                                message_data = json.load(f)
+                            
+                            # If message had no media, then JSON file is sufficient
+                            if not message_data.get('has_media', False):
+                                return True
+                            
+                            # If message had media but no attachment files found, consider it incomplete
+                            # Return False to allow re-download
+                            return False
+                            
+                        except Exception:
+                            # If can't read JSON, be safe and allow re-download
+                            return False
+                
+                # Backward compatibility: Also check old structure
                 message_file = date_folder / f"{message_id}_message.json"
                 if message_file.exists():
-                    # Message JSON exists, now check if attachments are also downloaded
-                    # Look for any non-JSON files that might be attachments for this message
+                    # Legacy structure - check for attachments
                     attachment_files = []
                     for file in date_folder.iterdir():
                         if file.is_file() and str(message_id) in file.name and not file.name.endswith('.json'):
                             attachment_files.append(file)
                     
-                    # If we found attachment files, consider it fully downloaded
                     if attachment_files:
                         return True
                     
-                    # If no attachments found, check the JSON file to see if message had media
+                    # Check if message had media
                     try:
                         with open(message_file, 'r', encoding='utf-8') as f:
                             message_data = json.load(f)
                         
-                        # If message had no media, then JSON file is sufficient
                         if not message_data.get('has_media', False):
                             return True
                         
-                        # If message had media but no attachment files found, consider it incomplete
-                        # Return False to allow re-download
                         return False
                         
                     except Exception:
-                        # If can't read JSON, be safe and allow re-download
                         return False
         
         return False
@@ -397,9 +428,41 @@ def get_download_status(channel_info, message_id, download_dir):
         if not base_path.exists():
             return "No channel directory"
         
-        # Look for message JSON file in any date folder
+        # Look for individual message folder in any date folder
         for date_folder in base_path.iterdir():
             if date_folder.is_dir():
+                # Check for individual message folder structure
+                message_folder = date_folder / f"msg_{message_id}"
+                if message_folder.exists() and message_folder.is_dir():
+                    message_file = message_folder / "message.json"
+                    password_file = message_folder / "password.json"
+                    
+                    if message_file.exists():
+                        # Count attachment files
+                        attachment_files = []
+                        for file in message_folder.iterdir():
+                            if file.is_file() and not file.name.endswith('.json'):
+                                attachment_files.append(file.name)
+                        
+                        try:
+                            with open(message_file, 'r', encoding='utf-8') as f:
+                                message_data = json.load(f)
+                            
+                            has_media = message_data.get('has_media', False)
+                            has_password = password_file.exists()
+                            
+                            if has_media and attachment_files:
+                                password_status = "with password" if has_password else "no password"
+                                return f"Complete (message folder + {len(attachment_files)} attachments: {', '.join(attachment_files)}, {password_status})"
+                            elif has_media and not attachment_files:
+                                return "Incomplete (message folder only, missing attachments)"
+                            elif not has_media:
+                                return "Complete (text-only message in folder)"
+                            
+                        except Exception:
+                            return "Message JSON file corrupted"
+                
+                # Backward compatibility: Also check old structure
                 message_file = date_folder / f"{message_id}_message.json"
                 if message_file.exists():
                     # Count attachment files
@@ -415,14 +478,14 @@ def get_download_status(channel_info, message_id, download_dir):
                         has_media = message_data.get('has_media', False)
                         
                         if has_media and attachment_files:
-                            return f"Complete (JSON + {len(attachment_files)} attachments: {', '.join(attachment_files)})"
+                            return f"Complete (legacy structure + {len(attachment_files)} attachments: {', '.join(attachment_files)})"
                         elif has_media and not attachment_files:
-                            return "Incomplete (JSON only, missing attachments)"
+                            return "Incomplete (legacy structure, missing attachments)"
                         elif not has_media:
-                            return "Complete (text-only message)"
+                            return "Complete (legacy text-only message)"
                         
                     except Exception:
-                        return "JSON file corrupted"
+                        return "Legacy JSON file corrupted"
         
         return "Not found"
     except Exception:
@@ -518,11 +581,58 @@ def find_content_duplicate(message_text, media_type, media_size, channel_info, d
         if not base_path.exists():
             return False, None, None
         
-        # Search through all existing message files
+        # Search through all existing message files (both new and legacy structures)
         for date_folder in base_path.iterdir():
             if not date_folder.is_dir():
                 continue
-                
+            
+            # Check new individual message folder structure
+            for item in date_folder.iterdir():
+                if item.is_dir() and item.name.startswith("msg_"):
+                    message_file = item / "message.json"
+                    if message_file.exists():
+                        try:
+                            with open(message_file, 'r', encoding='utf-8') as f:
+                                existing_data = json.load(f)
+                            
+                            existing_msg_id = existing_data.get('message_id')
+                            
+                            # Skip if it's the same message ID (already handled by ID-based detection)
+                            if existing_msg_id and str(existing_msg_id) in item.name:
+                                continue
+                            
+                            # Generate hash for existing message
+                            existing_text = existing_data.get('text', '')
+                            existing_media_type = existing_data.get('media_type')
+                            existing_media_size = existing_data.get('media_size')
+                            
+                            existing_hash = generate_content_hash(existing_text, existing_media_type, existing_media_size)
+                            
+                            # Check for exact content match
+                            if new_hash == existing_hash:
+                                return True, existing_msg_id, f"Exact content match (hash: {new_hash[:12]}...)"
+                            
+                            # Additional check for text-only messages with similar content but different media
+                            if message_text and existing_text:
+                                normalized_new = normalize_message_text(message_text)
+                                normalized_existing = normalize_message_text(existing_text)
+                                
+                                if (normalized_new and normalized_existing and 
+                                    normalized_new == normalized_existing and 
+                                    new_hash != existing_hash):
+                                    
+                                    # Check if it's a text-only vs media message scenario
+                                    if not media_type and existing_media_type:
+                                        return True, existing_msg_id, f"Text content match (text-only vs media message)"
+                                    elif media_type and not existing_media_type:
+                                        return True, existing_msg_id, f"Text content match (media vs text-only message)"
+                                    elif media_type and existing_media_type and media_type != existing_media_type:
+                                        return True, existing_msg_id, f"Text content match (different media types: {media_type} vs {existing_media_type})"
+                                
+                        except Exception:
+                            continue
+            
+            # Check legacy structure for backward compatibility
             for message_file in date_folder.glob("*_message.json"):
                 try:
                     with open(message_file, 'r', encoding='utf-8') as f:

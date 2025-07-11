@@ -14,6 +14,7 @@ import heapq
 import threading
 from typing import Dict, List, Optional, Any
 from enum import Enum
+from pathlib import Path
 
 # Enhanced download configuration
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv('MAX_CONCURRENT_DOWNLOADS', 5))
@@ -327,18 +328,24 @@ class TelethonDownloadManager:
                 self.download_queue.task_done()
     
     async def _download_media_telethon(self, client, message, channel_info, logger, compliance_logger, error_logger, expected_size=0):
-        """Fast download using telethon with minimal overhead."""
+        """Fast download using telethon with individual message folders and sequential processing."""
         try:
-            # Create directory structure quickly
+            # Create individual message folder structure
             channel_dir = sanitize_filename(channel_info['title'])
             date_folder = message.date.strftime('%Y-%m-%d')
-            download_path = os.path.join(self.download_dir, channel_dir, date_folder)
+            message_folder = f"msg_{message.id}"
+            download_path = os.path.join(self.download_dir, channel_dir, date_folder, message_folder)
             os.makedirs(download_path, exist_ok=True)
             
-            # Store message text first (minimal version)
+            logger.info(f"Created message folder: {download_path}")
+            
+            # Sequential processing: 1. Store message JSON first
             message_text_path = await self._store_message_text_fast(message, channel_info, download_path)
             
-            # Fast download with minimal progress tracking
+            # Sequential processing: 2. Extract and save password
+            password_file_path = await self._extract_and_save_password(message, message_text_path, download_path, logger)
+            
+            # Sequential processing: 3. Download attachments to message folder
             download_start_time = datetime.now()
             
             # Use telethon's native download_media method without progress callback for speed
@@ -348,13 +355,19 @@ class TelethonDownloadManager:
                 file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
                 download_duration = (datetime.now() - download_start_time).total_seconds()
                 
-                logger.info(f"Downloaded: {os.path.basename(file_path)} ({format_file_size(file_size)}) in {download_duration:.1f}s")
+                logger.info(f"Downloaded to message folder: {os.path.basename(file_path)} ({format_file_size(file_size)}) in {download_duration:.1f}s")
+                
+                # Sequential processing: 4. Auto-decompress if password is available
+                extraction_result = await self._auto_decompress_if_password_available(file_path, password_file_path, download_path, logger)
                 
                 return {
                     'file_path': file_path,
                     'file_size': file_size,
                     'download_duration': download_duration,
                     'message_text_path': message_text_path,
+                    'password_file_path': password_file_path,
+                    'extraction_result': extraction_result,
+                    'message_folder': download_path,
                     'message_attachment_paired': True,
                     'message_id': message.id,
                     'message_date': message.date.isoformat()
@@ -363,6 +376,8 @@ class TelethonDownloadManager:
                 return {
                     'file_path': None,
                     'message_text_path': message_text_path,
+                    'password_file_path': password_file_path,
+                    'message_folder': download_path,
                     'download_failed': True,
                     'message_attachment_paired': False,
                     'message_id': message.id,
@@ -374,12 +389,10 @@ class TelethonDownloadManager:
             return None
     
     async def _store_message_text_fast(self, message, channel_info, download_path):
-        """Fast message storage with minimal data and unique naming."""
+        """Fast message storage in individual message folder."""
         try:
-            # Use message date + message ID for unique, deterministic filename
-            # This prevents race conditions and ensures one-to-one message-file mapping
-            msg_date = message.date.strftime('%Y%m%d_%H%M%S')
-            message_filename = f"{msg_date}_msg_{message.id}_message.json"
+            # Simple filename since we're in a dedicated message folder
+            message_filename = "message.json"
             message_file_path = os.path.join(download_path, message_filename)
             
             # Minimal message data for speed with enhanced traceability
@@ -402,6 +415,132 @@ class TelethonDownloadManager:
             
         except Exception:
             return None
+    
+    async def _extract_and_save_password(self, message, message_text_path, download_path, logger):
+        """Extract password from message text and save to password.json."""
+        try:
+            # Import password extractor
+            from infostealer_parser.boxedpw.boxedpw_password_extractor import PasswordExtractor
+            
+            # Initialize password extractor
+            extractor = PasswordExtractor(logger)
+            
+            # Extract password from message text
+            password = extractor.extract_password(message.text or '')
+            
+            # Always create password.json file, even if no password found
+            password_file_path = os.path.join(download_path, "password.json")
+            
+            password_data = {
+                'message_id': message.id,
+                'channel': message_text_path,  # Reference to message file
+                'extracted_password': password,
+                'has_password': password is not None,
+                'extraction_timestamp': datetime.now().isoformat(),
+                'message_text': message.text or ''
+            }
+            
+            with open(password_file_path, 'w', encoding='utf-8') as f:
+                json.dump(password_data, f, indent=2, ensure_ascii=False)
+            
+            if password:
+                logger.info(f"Password extracted and saved: {password}")
+            else:
+                logger.info("No password found in message, saved empty password.json")
+            
+            return password_file_path
+            
+        except Exception as e:
+            logger.error(f"Error extracting password: {e}")
+            # Still create empty password file to maintain structure
+            try:
+                password_file_path = os.path.join(download_path, "password.json")
+                empty_password_data = {
+                    'message_id': message.id,
+                    'extracted_password': None,
+                    'has_password': False,
+                    'extraction_error': str(e),
+                    'extraction_timestamp': datetime.now().isoformat()
+                }
+                
+                with open(password_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(empty_password_data, f, indent=2, ensure_ascii=False)
+                
+                return password_file_path
+            except Exception:
+                return None
+    
+    async def _auto_decompress_if_password_available(self, file_path, password_file_path, download_path, logger):
+        """Auto-decompress archive if password is available."""
+        try:
+            # Check if downloaded file is an archive
+            if not file_path or not os.path.exists(file_path):
+                return {'attempted': False, 'reason': 'No file to decompress'}
+            
+            # Check if it's a supported archive format
+            archive_extensions = {'.rar', '.zip', '.7z', '.tar', '.tar.gz', '.tgz'}
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            if file_ext not in archive_extensions:
+                return {'attempted': False, 'reason': f'Unsupported archive format: {file_ext}'}
+            
+            # Read password from password.json
+            password = None
+            if password_file_path and os.path.exists(password_file_path):
+                try:
+                    with open(password_file_path, 'r', encoding='utf-8') as f:
+                        password_data = json.load(f)
+                        password = password_data.get('extracted_password')
+                except Exception as e:
+                    logger.error(f"Error reading password file: {e}")
+            
+            if not password:
+                return {'attempted': False, 'reason': 'No password available for decompression'}
+            
+            # Import archive decompressor
+            from archive_decompressor import ArchiveDecompressor
+            
+            # Initialize decompressor
+            decompressor = ArchiveDecompressor(logger=logger)
+            
+            # Create extraction directory
+            extract_dir = os.path.join(download_path, f"{os.path.splitext(os.path.basename(file_path))[0]}_extracted")
+            
+            # Attempt decompression
+            logger.info(f"Attempting auto-decompression with password: {password}")
+            
+            success, extracted_files = decompressor.extract_archive(
+                file_path,
+                download_path,
+                password=password,
+                create_subfolder=True
+            )
+            
+            if success:
+                logger.info(f"Successfully auto-decompressed {len(extracted_files)} files")
+                return {
+                    'attempted': True,
+                    'success': True,
+                    'extracted_files': extracted_files,
+                    'extract_dir': extract_dir,
+                    'password_used': password
+                }
+            else:
+                logger.warning(f"Auto-decompression failed with password: {password}")
+                return {
+                    'attempted': True,
+                    'success': False,
+                    'error': 'Decompression failed',
+                    'password_used': password
+                }
+                
+        except Exception as e:
+            logger.error(f"Error during auto-decompression: {e}")
+            return {
+                'attempted': True,
+                'success': False,
+                'error': str(e)
+            }
     
     async def _queue_workflow_processing(self, download_task: DownloadTask, download_result: Dict):
         """Queue completed download for workflow processing."""

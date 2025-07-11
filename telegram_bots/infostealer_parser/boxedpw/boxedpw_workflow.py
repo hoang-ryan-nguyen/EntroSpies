@@ -125,28 +125,30 @@ class BoxedPwWorkflow:
         }
         
         try:
-            # Build paths
-            download_path = Path(channel_dir) / date_folder
-            message_json_path = download_path / f"{message_id}_message.json"
+            # Build paths for new individual message folder structure
+            download_path = Path(channel_dir) / date_folder / f"msg_{message_id}"
+            message_json_path = download_path / "message.json"
+            password_json_path = download_path / "password.json"
             
             self.logger.info(f"Processing boxed.pw download - Message ID: {message_id}")
-            self.logger.debug(f"Download path: {download_path}")
+            self.logger.debug(f"Message folder: {download_path}")
             self.logger.debug(f"Expected message JSON: {message_json_path}")
+            self.logger.debug(f"Expected password JSON: {password_json_path}")
             
-            # Step 1: Extract password from message
-            password = self._extract_password_from_message(message_data, message_json_path)
+            # Step 1: Read password from saved password.json file
+            password = self._read_password_from_json_file(password_json_path)
             if password:
                 result['password_extracted'] = password
-                self.logger.info(f"Extracted password for message {message_id}: {password}")
+                self.logger.info(f"Read password from file for message {message_id}: {password}")
             else:
-                result['warnings'].append("No password found in message")
-                self.logger.warning(f"No password found for message {message_id}")
+                result['warnings'].append("No password found in password.json")
+                self.logger.warning(f"No password found in password.json for message {message_id}")
             
-            # Step 2: Find downloaded archive file
+            # Step 2: Find downloaded archive file in message folder
             archive_file = self._find_archive_file(download_path, message_id)
             if not archive_file:
-                result['errors'].append("No archive file found")
-                self.logger.error(f"No archive file found for message {message_id}")
+                result['errors'].append("No archive file found in message folder")
+                self.logger.error(f"No archive file found in message folder for message {message_id}")
                 return result
             
             # Step 2.1: Validate message-file pairing
@@ -235,6 +237,36 @@ class BoxedPwWorkflow:
         
         return result
     
+    def _read_password_from_json_file(self, password_json_path: Path) -> Optional[str]:
+        """
+        Read password from password.json file created by download manager.
+        
+        Args:
+            password_json_path: Path to password.json file
+            
+        Returns:
+            Extracted password or None
+        """
+        try:
+            if not password_json_path.exists():
+                self.logger.warning(f"Password JSON file not found: {password_json_path}")
+                return None
+            
+            with open(password_json_path, 'r', encoding='utf-8') as f:
+                password_data = json.load(f)
+            
+            password = password_data.get('extracted_password')
+            if password:
+                self.logger.info(f"Successfully read password from JSON file: {password}")
+                return password
+            else:
+                self.logger.info("Password JSON file exists but no password found")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Error reading password from JSON file: {e}")
+            return None
+
     def _extract_password_from_message(self, message_data: Dict[str, Any], 
                                      message_json_path: Path) -> Optional[str]:
         """
@@ -269,11 +301,10 @@ class BoxedPwWorkflow:
     
     def _find_archive_file(self, download_path: Path, message_id: int) -> Optional[Path]:
         """
-        Find the downloaded archive file for a specific message ID.
-        Enhanced to ensure correct message-file pairing.
+        Find the downloaded archive file in the individual message folder.
         
         Args:
-            download_path: Directory containing downloaded files
+            download_path: Message folder containing downloaded files
             message_id: Message ID to search for
             
         Returns:
@@ -281,42 +312,29 @@ class BoxedPwWorkflow:
         """
         try:
             if not download_path.exists():
-                self.logger.error(f"Download path does not exist: {download_path}")
+                self.logger.error(f"Message folder does not exist: {download_path}")
                 return None
             
-            # Strategy 1: Look for files with specific message ID pattern
-            # Expected pattern: *_msg_{message_id}_* or similar
-            matching_files = []
+            # In individual message folder structure, we just need to find any archive file
+            # excluding JSON files and extraction directories
+            archive_files = []
             for file_path in download_path.iterdir():
                 if file_path.is_file():
-                    # Check if filename contains message ID in expected pattern
-                    if f"_msg_{message_id}_" in file_path.name or f"msg_{message_id}" in file_path.name:
-                        # Check if it's a supported archive format
-                        if self.archive_decompressor.is_supported_format(file_path):
-                            matching_files.append(file_path)
-                            self.logger.debug(f"Found matching archive: {file_path.name} for message {message_id}")
+                    # Skip JSON files and check if it's a supported archive format
+                    if not file_path.name.endswith('.json') and self.archive_decompressor.is_supported_format(file_path):
+                        archive_files.append(file_path)
+                        self.logger.debug(f"Found archive file: {file_path.name}")
             
-            # If we found exactly one match, use it
-            if len(matching_files) == 1:
-                self.logger.info(f"Found archive file for message {message_id}: {matching_files[0].name}")
-                return matching_files[0]
-            elif len(matching_files) > 1:
-                self.logger.warning(f"Multiple archive files found for message {message_id}: {[f.name for f in matching_files]}")
+            # Return the first archive file found
+            if len(archive_files) == 1:
+                self.logger.info(f"Found archive file for message {message_id}: {archive_files[0].name}")
+                return archive_files[0]
+            elif len(archive_files) > 1:
+                self.logger.warning(f"Multiple archive files found for message {message_id}: {[f.name for f in archive_files]}")
                 # Return the first one, but log the issue
-                return matching_files[0]
+                return archive_files[0]
             
-            # Strategy 2: Fallback - look for any archive file but with validation
-            self.logger.warning(f"No exact match found for message {message_id}, searching for any archive file")
-            fallback_files = []
-            for file_path in download_path.iterdir():
-                if file_path.is_file() and self.archive_decompressor.is_supported_format(file_path):
-                    fallback_files.append(file_path)
-            
-            if fallback_files:
-                self.logger.warning(f"Using fallback archive file: {fallback_files[0].name} for message {message_id}")
-                return fallback_files[0]
-            
-            self.logger.error(f"No archive file found for message {message_id} in {download_path}")
+            self.logger.error(f"No archive file found in message folder for message {message_id}")
             return None
             
         except Exception as e:
@@ -326,6 +344,7 @@ class BoxedPwWorkflow:
     def _validate_message_file_pairing(self, message_id: int, archive_file: Path, password: Optional[str]) -> bool:
         """
         Validate that the archive file belongs to the correct message.
+        With individual message folders, pairing is guaranteed by folder structure.
         
         Args:
             message_id: Message ID
@@ -336,21 +355,15 @@ class BoxedPwWorkflow:
             True if pairing is valid, False otherwise
         """
         try:
-            # Check 1: Archive file name should contain message ID
-            if f"_msg_{message_id}_" in archive_file.name or f"msg_{message_id}" in archive_file.name:
+            # With individual message folder structure, the pairing is guaranteed
+            # Just verify the file exists in the expected message folder
+            expected_folder = f"msg_{message_id}"
+            if expected_folder in str(archive_file.parent):
                 self.logger.debug(f"Message-file pairing validation passed: {message_id} -> {archive_file.name}")
                 return True
             
-            # Check 2: Look for corresponding JSON file
-            json_file_pattern = f"*_msg_{message_id}_message.json"
-            json_files = list(archive_file.parent.glob(json_file_pattern))
-            
-            if json_files:
-                self.logger.debug(f"Found corresponding JSON file for message {message_id}: {json_files[0].name}")
-                return True
-            
-            # Check 3: If no strict matching, warn but don't fail
-            self.logger.warning(f"Could not strictly validate message-file pairing for message {message_id} and file {archive_file.name}")
+            # If the file is not in the expected folder, it's likely a mis-pairing
+            self.logger.warning(f"File {archive_file.name} not in expected message folder msg_{message_id}")
             return False
             
         except Exception as e:
