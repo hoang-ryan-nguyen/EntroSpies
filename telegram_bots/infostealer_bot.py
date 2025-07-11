@@ -13,7 +13,7 @@ import re
 import logging
 from datetime import datetime
 from pathlib import Path
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, ChannelPrivateError, FloodWaitError
 
 # Import custom modules
@@ -24,7 +24,6 @@ from master_workflow_orchestrator import MasterWorkflowOrchestrator
 # Default configuration
 DEFAULT_SESSION = os.getenv('SESSION_NAME', 'entrospies_session')
 DEFAULT_CONFIG = os.getenv('CONFIG_FILE', 'config/channel_list.json')
-DEFAULT_API_CONFIG = os.getenv('API_CONFIG_FILE', 'api_config.json')
 DEFAULT_OUTPUT_DIR = os.getenv('DOWNLOAD_DIR', 'download')
 DEFAULT_LOGS_DIR = os.getenv('LOGS_DIR', 'logs')
 DEFAULT_MESSAGES = int(os.getenv('DEFAULT_MESSAGES', 1))
@@ -60,7 +59,7 @@ def parse_size(size_str):
     
     return int(number * multipliers[unit])
 
-def load_api_credentials(api_config_path=DEFAULT_API_CONFIG):
+def load_api_credentials():
     """Load Telegram API credentials from environment variables or config file."""
     # Try environment variables first
     env_api_id = os.getenv('TELEGRAM_API_ID')
@@ -77,6 +76,7 @@ def load_api_credentials(api_config_path=DEFAULT_API_CONFIG):
             sys.exit(1)
     
     # Fallback to config file
+    api_config_path = 'api_config.json'
     try:
         with open(api_config_path, 'r', encoding='utf-8') as f:
             api_config = json.load(f)
@@ -117,13 +117,13 @@ def setup_argument_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  %(prog)s                                    # Basic usage with defaults
+  %(prog)s                                    # Listen for new messages in real-time
+  %(prog)s -m 10                             # Download 10 latest messages from each channel
   %(prog)s -s my_session -v                  # Custom session with verbose logging
   %(prog)s -m 10 --prevent-big-files         # Download 10 messages, skip large files
   %(prog)s -c config/custom_channels.json --max-file-size 500MB  # Custom config with 500MB limit
   %(prog)s --dry-run -vvv                    # Preview mode with maximum verbosity
   %(prog)s --channels "channel1,channel2"    # Process specific channels only
-  %(prog)s --api-config my_api.json          # Use custom API config file
   %(prog)s -s session/qualgolab_telegram.session -c config/channel_list.json -vvv    # My favorite run command
         '''
     )
@@ -139,8 +139,8 @@ Examples:
     parser.add_argument(
         '-m', '--messages',
         type=int,
-        default=DEFAULT_MESSAGES,
-        help=f'Number of messages to download per channel (default: {DEFAULT_MESSAGES})'
+        default=None,
+        help=f'Number of messages to download per channel (default: listen for new messages in real-time)'
     )
     
     # Logging verbosity
@@ -158,12 +158,6 @@ Examples:
         help=f'Path to channel list file (default: {DEFAULT_CONFIG})'
     )
     
-    # API configuration file
-    parser.add_argument(
-        '--api-config',
-        default=DEFAULT_API_CONFIG,
-        help=f'Path to API config file with Telegram credentials (default: {DEFAULT_API_CONFIG})'
-    )
     
     # File size controls (mutually exclusive)
     size_group = parser.add_mutually_exclusive_group()
@@ -270,12 +264,6 @@ def validate_arguments(args):
         print(f"Error: Channel list file not found: {args.config}")
         sys.exit(1)
     
-    # Validate API config file
-    if not os.path.exists(args.api_config):
-        print(f"Error: API config file not found: {args.api_config}")
-        print("Please create an api_config.json file with your Telegram API credentials:")
-        print('{"telegram_api": {"api_id": YOUR_API_ID, "api_hash": "YOUR_API_HASH"}}')
-        sys.exit(1)
     
     # Parse and validate file size limits
     if args.prevent_big_files:
@@ -289,10 +277,15 @@ def validate_arguments(args):
     else:
         args.max_file_size_bytes = None  # No limit
     
-    # Validate message count
-    if args.messages < 1:
+    # Validate message count (None means listening mode)
+    if args.messages is not None and args.messages < 1:
         print("Error: Number of messages must be at least 1")
         sys.exit(1)
+    
+    # Set listening mode flag
+    args.listening_mode = args.messages is None
+    if args.listening_mode:
+        args.messages = DEFAULT_MESSAGES  # Fallback for compatibility
     
     # Create output directory
     os.makedirs(args.output, exist_ok=True)
@@ -537,6 +530,102 @@ async def store_message_text_standalone(message, channel_info, output_dir, logge
         error_logger.error(f"MESSAGE_TEXT_STANDALONE_ERROR: {str(e)}, MessageID={message.id}, Channel={channel_info['title']}")
         return None
 
+async def setup_message_listener(client, channels, download_manager, workflow_orchestrator, args, logger, compliance_logger, error_logger):
+    """Setup event handler for listening to new messages."""
+    
+    # Create channel ID to channel info mapping
+    channel_mapping = {channel['id']: channel for channel in channels}
+    
+    @client.on(events.NewMessage)
+    async def handler(event):
+        """Handle new messages from monitored channels."""
+        try:
+            # Check if message is from a monitored channel
+            if event.chat_id not in channel_mapping:
+                return
+            
+            channel_info = channel_mapping[event.chat_id]
+            message = event.message
+            
+            logger.info(f"New message received from {channel_info['title']}: ID={message.id}")
+            compliance_logger.info(f"REALTIME_MESSAGE: Channel={channel_info['title']}, MessageID={message.id}, Date={message.date}")
+            
+            # Check if message already downloaded
+            if is_message_already_downloaded(channel_info, message.id, args.output):
+                status = get_download_status(channel_info, message.id, args.output)
+                logger.info(f"Skipping already downloaded message {message.id}: {status}")
+                return
+            
+            # Process the message
+            message_data = {
+                'channel_info': channel_info,
+                'message_id': message.id,
+                'date': message.date.isoformat(),
+                'text': message.text or '',
+                'media_type': None,
+                'has_media': bool(message.media),
+                'downloaded_files': [],
+                'parser': channel_info.get('parser', '')
+            }
+            
+            # Handle media downloads
+            if message.media and not args.dry_run:
+                media_type = type(message.media).__name__
+                media_size = get_media_size(message)
+                message_data['media_type'] = media_type
+                message_data['media_size'] = media_size
+                message_data['media_size_formatted'] = format_file_size(media_size)
+                
+                logger.info(f"Processing media: {media_type}, Size: {format_file_size(media_size)}")
+                
+                # Check size limits
+                if args.max_file_size_bytes and media_size > args.max_file_size_bytes:
+                    logger.warning(f"File too large ({format_file_size(media_size)}), skipping download")
+                    message_data['download_skipped'] = True
+                    message_data['skip_reason'] = f"File too large ({format_file_size(media_size)})"
+                else:
+                    # Download the file
+                    download_id = await download_manager.add_download(
+                        client, message, channel_info, logger, compliance_logger, error_logger, media_size
+                    )
+                    
+                    # Wait for download to complete
+                    await download_manager.wait_for_download(download_id)
+                    
+                    # Get download result
+                    result = download_manager.download_results.get(download_id)
+                    if result:
+                        message_data['downloaded_files'] = [result]
+                    
+                    logger.info(f"Download completed: {download_id}")
+            elif not message.media:
+                # Store text-only message
+                message_text_path = await store_message_text_standalone(
+                    message, channel_info, args.output, logger, compliance_logger, error_logger
+                )
+                if message_text_path:
+                    message_data['message_text_path'] = message_text_path
+            
+            # Process with workflow orchestrator
+            if message_data.get('downloaded_files') or message_data.get('message_text_path'):
+                logger.info(f"Processing message {message.id} with workflow orchestrator")
+                workflow_result = workflow_orchestrator.process_message(message_data)
+                message_data['workflow_processing'] = workflow_result
+                
+                if workflow_result.get('success'):
+                    logger.info(f"Workflow processing successful for message {message.id}")
+                else:
+                    logger.warning(f"Workflow processing failed for message {message.id}: {workflow_result.get('errors', [])}")
+                
+                compliance_logger.info(f"REALTIME_WORKFLOW: MessageID={message.id}, Success={workflow_result.get('success')}")
+            
+        except Exception as e:
+            logger.error(f"Error processing real-time message: {e}")
+            error_logger.error(f"REALTIME_ERROR: {str(e)}, MessageID={getattr(event.message, 'id', 'unknown')}")
+    
+    logger.info(f"Message listener setup complete for {len(channels)} channels")
+    compliance_logger.info(f"REALTIME_LISTENER: Monitoring {len(channels)} channels for new messages")
+
 async def get_messages_from_channel(client, channel_info, download_manager, args, logger, compliance_logger, error_logger):
     """Get messages from a specific channel with concurrent downloads."""
     try:
@@ -670,14 +759,15 @@ async def main_process(args):
         logger.info("🔍 DRY RUN MODE: No files will be downloaded")
     
     # Log configuration
-    logger.info(f"Configuration: Session={args.session}, Messages={args.messages}, Output={args.output}")
+    mode = "listening for new messages" if args.listening_mode else f"downloading {args.messages} messages"
+    logger.info(f"Configuration: Session={args.session}, Mode={mode}, Output={args.output}")
     if args.max_file_size_bytes:
         logger.info(f"File size limit: {format_file_size(args.max_file_size_bytes)}")
     
     # Load API credentials
-    api_id, api_hash = load_api_credentials(args.api_config)
-    logger.info(f"Loaded API credentials from: {args.api_config}")
-    compliance_logger.info(f"API_CONFIG: Loaded credentials from {args.api_config}")
+    api_id, api_hash = load_api_credentials()
+    logger.info("Loaded API credentials from environment variables or api_config.json")
+    compliance_logger.info("API_CONFIG: Loaded credentials from environment or fallback file")
     
     # Load channels configuration
     channels = load_channels_config(args.config, logger, compliance_logger, args)
@@ -720,6 +810,31 @@ async def main_process(args):
         )
         logger.info("Master workflow orchestrator initialized")
         compliance_logger.info("WORKFLOW_ORCHESTRATOR: Initialized for post-download processing")
+        
+        # Handle listening mode vs batch mode
+        if args.listening_mode:
+            # Real-time listening mode
+            logger.info("🔊 Starting real-time message listening mode")
+            compliance_logger.info("LISTENING_MODE: Real-time message monitoring activated")
+            
+            # Setup message listener
+            await setup_message_listener(
+                client, channels, download_manager, workflow_orchestrator, args, logger, compliance_logger, error_logger
+            )
+            
+            # Keep the client running
+            logger.info("Bot is now listening for new messages. Press Ctrl+C to stop.")
+            try:
+                await client.run_until_disconnected()
+            except KeyboardInterrupt:
+                logger.info("Received shutdown signal, stopping message listener...")
+                compliance_logger.info("LISTENING_MODE_STOPPED: User requested shutdown")
+            
+            return  # Exit early for listening mode
+        
+        # Batch processing mode (original behavior)
+        logger.info("📦 Starting batch message processing mode")
+        compliance_logger.info("BATCH_MODE: Processing historical messages")
         
         # Collect messages from each channel
         all_collected_messages = []

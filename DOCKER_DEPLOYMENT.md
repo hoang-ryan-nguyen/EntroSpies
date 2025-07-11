@@ -263,7 +263,7 @@ docker inspect entrospies-bot
 To run custom bot commands:
 ```bash
 # Access container and run custom command
-docker-compose exec entrospies-bot python3 telegram_bots/infostealer_bot.py -s session/qualgolab_telegram.session --api-config api_config.json -c config/channel_list.json -m 10 --dry-run
+docker-compose exec entrospies-bot python3 telegram_bots/infostealer_bot.py -s session/qualgolab_telegram.session -c config/channel_list.json -m 10 --dry-run
 ```
 
 ### Elasticsearch Integration

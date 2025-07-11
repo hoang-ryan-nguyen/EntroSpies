@@ -10,11 +10,12 @@ EntroSpies is a threat intelligence collector focused on gathering leaked creden
 ## 🚀 Features
 
 ### Core Capabilities
+- **Real-time Message Listening** - Continuous monitoring for new messages with instant processing
 - **Fast Multi-threaded Downloads** - Optimized telethon-based concurrent downloads (5 workers)
 - **Smart Channel Management** - Automated channel discovery and parser-based filtering
 - **Message-Attachment Pairing** - Guaranteed data integrity with linked message metadata
 - **Comprehensive CLI** - Full-featured command-line interface with extensive options
-- **Real-time Monitoring** - Progress tracking with download statistics
+- **Dual Operation Modes** - Real-time listening or batch processing of historical messages
 - **Compliance Logging** - Comprehensive audit trails for security compliance
 
 ### Advanced Features
@@ -172,14 +173,20 @@ docker-compose up -d --build
 cd telegram_bots
 source ../venv_entrospies/bin/activate
 
-# Basic usage
+# Basic usage (real-time listening)
 python3 infostealer_bot.py
 
+# Download latest messages from each channel
+python3 infostealer_bot.py -m 10
+
 # Advanced usage examples
-python3 infostealer_bot.py -s session/qualgolab_telegram.session --api-config api_config.json -c config/channel_list.json -vvv -m 10
+python3 infostealer_bot.py -s session/qualgolab_telegram.session -c config/channel_list.json -vvv -m 10
 
 # Download with file size limits
 python3 infostealer_bot.py --max-file-size 500MB -m 5
+
+# Real-time listening with verbose logging
+python3 infostealer_bot.py -vvv
 
 # Dry run mode (preview only)
 python3 infostealer_bot.py --dry-run -vvv
@@ -193,9 +200,8 @@ python3 infostealer_bot.py --channels "channel1,channel2"
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-s, --session` | Session file path | `entrospies_session` |
-| `-m, --messages` | Messages per channel | `1` |
+| `-m, --messages` | Messages per channel | `Real-time listening` |
 | `-v, --verbose` | Logging verbosity | Warning level |
-| `--api-config` | API config file | `api_config.json` |
 | `-c, --config` | Channel list file | `config/channel_list.json` |
 | `--prevent-big-files` | Skip files >1GB | `False` |
 | `--max-file-size` | Custom size limit | None |
