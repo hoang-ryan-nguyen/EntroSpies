@@ -437,13 +437,24 @@ def load_channels_config(config_path, logger, compliance_logger, args):
         channels = config.get('channels', [])
         logger.debug(f"Raw channels loaded: {len(channels)}")
         
-        # Filter channels with specific parsers (not default)
+        # Filter channels with specific parsers (not default) and validate priorities
         filtered_channels = []
+        valid_priorities = {'high', 'medium', 'low'}
+        
         for channel in channels:
             parser = channel.get('parser', '')
             if parser != 'infostealer_parser/_default.py':
+                # Validate and set priority
+                default_priority = os.getenv('DEFAULT_CHANNEL_PRIORITY', 'medium')
+                priority = channel.get('priority', default_priority)
+                if priority not in valid_priorities:
+                    logger.warning(f"Invalid priority '{priority}' for channel {channel['title']}, defaulting to '{default_priority}'")
+                    channel['priority'] = default_priority
+                else:
+                    channel['priority'] = priority
+                
                 filtered_channels.append(channel)
-                compliance_logger.info(f"Channel selected for processing: {channel['title']} (ID: {channel['id']}, Parser: {parser})")
+                compliance_logger.info(f"Channel selected for processing: {channel['title']} (ID: {channel['id']}, Parser: {parser}, Priority: {channel['priority']})")
         
         # Apply command-line channel filters
         if args.channels_list:
@@ -611,18 +622,9 @@ async def setup_message_listener(client, channels, download_manager, workflow_or
                 if message_text_path:
                     message_data['message_text_path'] = message_text_path
             
-            # Process with workflow orchestrator
-            if message_data.get('downloaded_files') or message_data.get('message_text_path'):
-                logger.info(f"Processing message {message.id} with workflow orchestrator")
-                workflow_result = workflow_orchestrator.process_message(message_data)
-                message_data['workflow_processing'] = workflow_result
-                
-                if workflow_result.get('success'):
-                    logger.info(f"Workflow processing successful for message {message.id}")
-                else:
-                    logger.warning(f"Workflow processing failed for message {message.id}: {workflow_result.get('errors', [])}")
-                
-                compliance_logger.info(f"REALTIME_WORKFLOW: MessageID={message.id}, Success={workflow_result.get('success')}")
+            # Note: Workflow processing is now handled automatically by the integrated download system
+            # The download manager will queue workflow processing when downloads complete
+            logger.info(f"Message {message.id} processed - workflow will be handled automatically by download system")
             
         except Exception as e:
             logger.error(f"Error processing real-time message: {e}")
@@ -801,13 +803,6 @@ async def main_process(args):
         logger.info(f"Logged in as: {me.first_name} {me.last_name or ''} (@{me.username or 'no username'})")
         compliance_logger.info(f"USER_SESSION: UserID={me.id}, Username={me.username}, Phone={me.phone}")
         
-        # Initialize download manager for concurrent downloads
-        download_manager = DownloadManager(download_dir=args.output)
-        download_workers = await download_manager.start_workers()
-        
-        logger.info(f"Started {len(download_workers)} download workers")
-        compliance_logger.info(f"DOWNLOAD_MANAGER: Started {len(download_workers)} concurrent workers")
-        
         # Initialize master workflow orchestrator
         workflow_orchestrator = MasterWorkflowOrchestrator(
             base_download_dir=args.output,
@@ -815,6 +810,16 @@ async def main_process(args):
         )
         logger.info("Master workflow orchestrator initialized")
         compliance_logger.info("WORKFLOW_ORCHESTRATOR: Initialized for post-download processing")
+        
+        # Initialize enhanced download manager with workflow integration
+        download_manager = DownloadManager(
+            download_dir=args.output,
+            workflow_orchestrator=workflow_orchestrator
+        )
+        download_workers = await download_manager.start_workers()
+        
+        logger.info(f"Started {len(download_workers)} download and workflow workers")
+        compliance_logger.info(f"DOWNLOAD_MANAGER: Started {len(download_workers)} concurrent workers with workflow integration")
         
         # Handle listening mode vs batch mode
         if args.listening_mode:
@@ -864,58 +869,51 @@ async def main_process(args):
                     compliance_logger.info("RATE_LIMIT_DELAY: 1 second delay enforced")
                     await asyncio.sleep(1)
             
-            # Wait for all downloads to complete
+            # Wait for all downloads and workflows to complete
             if all_download_ids and not args.dry_run:
-                logger.info(f"Waiting for {len(all_download_ids)} downloads to complete...")
-                compliance_logger.info(f"DOWNLOAD_WAIT: Waiting for {len(all_download_ids)} downloads")
+                logger.info(f"Waiting for {len(all_download_ids)} downloads and workflows to complete...")
+                compliance_logger.info(f"DOWNLOAD_WAIT: Waiting for {len(all_download_ids)} downloads with integrated workflows")
                 
                 # Start progress monitoring
-                print(f"\n📥 Starting {len(all_download_ids)} downloads with progress monitoring...")
+                print(f"\n📥 Starting {len(all_download_ids)} downloads with integrated workflow processing...")
                 download_manager.start_progress_monitoring(len(all_download_ids))
                 
-                await download_manager.wait_for_downloads()
+                # Wait for both downloads and workflows to complete
+                await download_manager.wait_for_all()
                 
                 # Ensure progress monitor is stopped
                 download_manager.progress_monitor.stop_monitoring()
-                print("✅ All downloads completed!")
+                print("✅ All downloads and workflows completed!")
                 
                 # Update message data with download results
                 for message_data in all_collected_messages:
                     if message_data.get('download_ids'):
                         downloaded_files = []
+                        workflow_results = []
                         for download_id in message_data['download_ids']:
+                            # Get download result
                             result = download_manager.download_results.get(download_id)
                             if result:
                                 downloaded_files.append(result)
+                            
+                            # Get workflow result
+                            workflow_result = download_manager.workflow_results.get(f"workflow_{download_id}")
+                            if workflow_result:
+                                workflow_results.append(workflow_result)
+                        
                         message_data['downloaded_files'] = downloaded_files
+                        message_data['workflow_processing'] = workflow_results
                         del message_data['download_ids']  # Remove temporary field
                 
-                # Process messages with workflow orchestrator
-                logger.info("Starting post-download workflow processing...")
-                compliance_logger.info("WORKFLOW_PROCESSING: Starting post-download message processing")
+                # Log integrated processing statistics
+                download_stats = download_manager.get_download_statistics()
+                logger.info(f"Integrated processing completed: {download_stats['download_stats']['completed']} downloads, {download_stats['workflow_results']} workflows processed")
+                compliance_logger.info(f"INTEGRATED_STATS: Downloads={download_stats['download_stats']['completed']}, Workflows={download_stats['workflow_results']}, Failed={download_stats['download_stats']['failed']}")
                 
-                # Filter messages that have downloaded files or need processing
-                messages_to_process = [
-                    msg for msg in all_collected_messages 
-                    if (msg.get('downloaded_files') and any(f.get('success') for f in msg['downloaded_files'])) 
-                    or msg.get('duplicate_skipped')
-                ]
-                
-                if messages_to_process:
-                    logger.info(f"Processing {len(messages_to_process)} messages with workflows")
-                    workflow_results = workflow_orchestrator.process_messages_batch(messages_to_process)
-                    
-                    # Add workflow results to message data
-                    for message_data, workflow_result in zip(messages_to_process, workflow_results):
-                        message_data['workflow_processing'] = workflow_result
-                    
-                    # Log workflow statistics
-                    workflow_stats = workflow_orchestrator.get_processing_statistics()
-                    logger.info(f"Workflow processing completed: {workflow_stats['successful_processing']}/{workflow_stats['total_messages_processed']} successful")
-                    compliance_logger.info(f"WORKFLOW_STATS: Processed={workflow_stats['total_messages_processed']}, Success={workflow_stats['successful_processing']}, Failed={workflow_stats['failed_processing']}")
-                else:
-                    logger.info("No messages require workflow processing")
-                    compliance_logger.info("WORKFLOW_PROCESSING: No messages to process")
+                # Show priority distribution
+                priority_stats = download_stats['priority_distribution']
+                logger.info(f"Priority distribution: HIGH={priority_stats['HIGH']}, MEDIUM={priority_stats['MEDIUM']}, LOW={priority_stats['LOW']}")
+                compliance_logger.info(f"PRIORITY_STATS: {priority_stats}")
         
         finally:
             # Shutdown download manager

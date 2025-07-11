@@ -1,9 +1,0 @@
-SOFT: Chrome Default (137.0.7151.122)
-URL: https://user.vnedu.vn/sso/
-USER: gv729509570
-PASS: 912408
-
-SOFT: Chrome Default (137.0.7151.122)
-URL: https://hagiang.vnerp.vn/web/reset_password
-USER: Lien1991@12
-PASS: Lien1991@12

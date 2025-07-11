@@ -17,7 +17,8 @@
       "participants": 14339,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/boxedpw/boxedpw_workflow.py"
+      "parser": "infostealer_parser/boxedpw/boxedpw_workflow.py",
+      "priority": "high"
     },
     {
       "title": "Everlasting Cloud",
@@ -26,7 +27,8 @@
       "participants": 7141,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "medium"
     },
     {
       "title": "textbases (url:log:pass)",
@@ -35,7 +37,8 @@
       "participants": 7477,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "medium"
     },
     {
       "title": "INFO CLOUD",
@@ -44,7 +47,8 @@
       "participants": 659,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "low"
     },
     {
       "title": "UNIVERSE CLOUD / txtbases",
@@ -53,7 +57,8 @@
       "participants": 3153,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "medium"
     },
     {
       "title": "HUBHEAD | VIP SNATCH ROOM 2",
@@ -62,7 +67,8 @@
       "participants": 5742,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "medium"
     },
     {
       "title": "Borwita 🄵🅁🄴🄴 Logs [REDLINE]",
@@ -71,7 +77,8 @@
       "participants": 6224,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "medium"
     },
     {
       "title": "Source News",
@@ -80,7 +87,8 @@
       "participants": 744,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "low"
     },
     {
       "title": "🌧 RAIN CLOUD [FREE]",
@@ -89,7 +97,8 @@
       "participants": 1280,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "low"
     },
     {
       "title": "BerserkLogs | Shop",
@@ -98,7 +107,8 @@
       "participants": 3805,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "medium"
     },
     {
       "title": "Malware Logs | Spam | Traffic | Install",
@@ -107,7 +117,8 @@
       "participants": 361,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "low"
     },
     {
       "title": "cBanke [LOGS]",
@@ -116,7 +127,8 @@
       "participants": 2280,
       "verified": false,
       "restricted": false,
-      "parser": "infostealer_parser/_default.py"
+      "parser": "infostealer_parser/_default.py",
+      "priority": "medium"
     }
   ]
 }
