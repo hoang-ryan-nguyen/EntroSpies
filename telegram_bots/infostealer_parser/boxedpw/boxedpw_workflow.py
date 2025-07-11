@@ -114,6 +114,8 @@ class BoxedPwWorkflow:
             'processing_time': 0,
             'password_extracted': None,
             'password_successful': None,
+            'password_json_file': None,
+            'password_saved_to_disk': False,
             'archive_extracted': False,
             'extracted_files': [],
             'log_files_found': [],
@@ -154,8 +156,20 @@ class BoxedPwWorkflow:
             
             self.logger.info(f"Found archive file for message {message_id}: {archive_file.name}")
             
+            # Step 2.2: Save password to JSON file immediately to prevent race conditions
+            password_json_path = None
+            if password:
+                password_json_path = self._save_password_to_json(download_path, message_id, archive_file, password)
+                if password_json_path:
+                    result['password_json_file'] = str(password_json_path)
+                    result['password_saved_to_disk'] = True
+                    self.logger.info(f"Password saved to disk before decompression: {password_json_path}")
+                else:
+                    result['warnings'].append("Failed to save password to JSON file")
+                    self.logger.warning("Failed to save password to JSON file, continuing with memory-only approach")
+            
             # Step 3: Extract archive
-            extraction_result = self._extract_archive(archive_file, password, result)
+            extraction_result = self._extract_archive(archive_file, password, result, password_json_path)
             
             # Step 4: Parse extracted logs if extraction successful
             if extraction_result['success']:
@@ -344,14 +358,16 @@ class BoxedPwWorkflow:
             return False
     
     def _extract_archive(self, archive_file: Path, password: Optional[str], 
-                        result: Dict[str, Any]) -> Dict[str, Any]:
+                        result: Dict[str, Any], password_json_path: Optional[Path] = None) -> Dict[str, Any]:
         """
         Extract archive file using password.
+        Reads password from JSON file first if available, falls back to memory password.
         
         Args:
             archive_file: Path to archive file
-            password: Extracted password
+            password: Extracted password (fallback)
             result: Result dictionary to update
+            password_json_path: Path to JSON file containing password
             
         Returns:
             Dictionary with extraction results
@@ -370,28 +386,37 @@ class BoxedPwWorkflow:
             
             self.logger.info(f"Extracting archive: {archive_file}")
             
+            # Try to read password from JSON file first (prevents race conditions)
+            json_password = None
+            if password_json_path:
+                json_password = self._read_password_from_json(password_json_path)
+            
+            # Use JSON password if available, otherwise fall back to memory password
+            active_password = json_password if json_password else password
+            
             # Try extraction with extracted password first
-            if password:
+            if active_password:
                 success, files = self.archive_decompressor.extract_archive(
                     archive_file, 
                     extract_dir.parent,
-                    password=password,
+                    password=active_password,
                     create_subfolder=True
                 )
                 
                 if success:
                     extraction_result['success'] = True
                     extraction_result['extracted_files'] = files
-                    extraction_result['successful_password'] = password
-                    result['password_successful'] = password
+                    extraction_result['successful_password'] = active_password
+                    result['password_successful'] = active_password
                     result['archive_extracted'] = True
                     result['extracted_files'] = files
                     
-                    self.logger.info(f"Successfully extracted {len(files)} files with password: {password}")
+                    source_info = "JSON file" if json_password else "memory"
+                    self.logger.info(f"Successfully extracted {len(files)} files with password from {source_info}: {active_password}")
                     return extraction_result
                 else:
-                    result['warnings'].append(f"Extraction failed with extracted password: {password}")
-                    self.logger.warning(f"Extraction failed with password: {password}")
+                    result['warnings'].append(f"Extraction failed with extracted password: {active_password}")
+                    self.logger.warning(f"Extraction failed with password: {active_password}")
             
             # Try extraction without password
             self.logger.info("Trying extraction without password")
@@ -412,12 +437,12 @@ class BoxedPwWorkflow:
                 return extraction_result
             
             # Try with common passwords if extracted password failed
-            if password:
+            if active_password:
                 common_passwords = [
-                    password.lower(),
-                    password.upper(),
-                    password.replace('_', ''),
-                    password.replace('-', ''),
+                    active_password.lower(),
+                    active_password.upper(),
+                    active_password.replace('_', ''),
+                    active_password.replace('-', ''),
                 ]
                 
                 success, successful_password, files = self.archive_decompressor.extract_with_password_list(
@@ -447,6 +472,108 @@ class BoxedPwWorkflow:
         
         return extraction_result
     
+    def _save_password_to_json(self, download_path: Path, message_id: int, 
+                              archive_file: Path, password: str) -> Optional[Path]:
+        """
+        Save extracted password to JSON file immediately after extraction.
+        This prevents race conditions and memory collisions during decompression.
+        
+        Args:
+            download_path: Directory containing downloaded files
+            message_id: Message ID for filename
+            archive_file: Path to the archive file
+            password: Extracted password
+            
+        Returns:
+            Path to created JSON file or None if failed
+        """
+        try:
+            # Validate inputs
+            if not download_path or not download_path.exists():
+                raise ValueError(f"Download path does not exist: {download_path}")
+            
+            if not password or not password.strip():
+                raise ValueError("Password is empty or invalid")
+            
+            # Create password JSON file path
+            password_json_path = download_path / f"{message_id}_password.json"
+            
+            # Prepare password data
+            password_data = {
+                "message_id": message_id,
+                "channel": ".boxed.pw",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "downloaded_file": str(archive_file),
+                "extracted_password": password,
+                "password_source": "message_text",
+                "extraction_successful": True
+            }
+            
+            # Write to JSON file with proper encoding
+            with open(password_json_path, 'w', encoding='utf-8') as f:
+                json.dump(password_data, f, indent=2, ensure_ascii=False)
+            
+            # Verify the file was created and is readable
+            if not password_json_path.exists():
+                raise IOError(f"Password JSON file was not created: {password_json_path}")
+            
+            self.logger.info(f"Password saved to JSON file: {password_json_path}")
+            return password_json_path
+            
+        except (ValueError, IOError, OSError) as e:
+            self.logger.error(f"Failed to save password to JSON file: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error saving password to JSON file: {e}")
+            return None
+
+    def _read_password_from_json(self, password_json_path: Path) -> Optional[str]:
+        """
+        Safely read password from JSON file with comprehensive error handling.
+        
+        Args:
+            password_json_path: Path to the JSON file containing password
+            
+        Returns:
+            Password string or None if reading failed
+        """
+        try:
+            # Validate file exists and is readable
+            if not password_json_path or not password_json_path.exists():
+                self.logger.warning(f"Password JSON file does not exist: {password_json_path}")
+                return None
+            
+            if not password_json_path.is_file():
+                self.logger.warning(f"Password JSON path is not a file: {password_json_path}")
+                return None
+            
+            # Read and parse JSON file
+            with open(password_json_path, 'r', encoding='utf-8') as f:
+                password_data = json.load(f)
+            
+            # Extract password with validation
+            if not isinstance(password_data, dict):
+                self.logger.warning(f"Password JSON file contains invalid data structure: {password_json_path}")
+                return None
+            
+            password = password_data.get('extracted_password')
+            if not password or not isinstance(password, str):
+                self.logger.warning(f"No valid password found in JSON file: {password_json_path}")
+                return None
+            
+            self.logger.info(f"Successfully read password from JSON file: {password_json_path}")
+            return password
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON format in password file {password_json_path}: {e}")
+            return None
+        except (IOError, OSError) as e:
+            self.logger.error(f"Error reading password JSON file {password_json_path}: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error reading password JSON file {password_json_path}: {e}")
+            return None
+
     def _cleanup_extraction_dir(self, extract_dir: Path) -> None:
         """
         Clean up extraction directory.
