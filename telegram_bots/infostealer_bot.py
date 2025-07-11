@@ -844,7 +844,7 @@ async def setup_message_listener(client, channels, download_manager, workflow_or
     # Create channel ID to channel info mapping
     channel_mapping = {channel['id']: channel for channel in channels}
     
-    @client.on(events.NewMessage)
+    @client.on(events.NewMessage(incoming=True))
     async def handler(event):
         """Handle new messages from monitored channels."""
         try:
