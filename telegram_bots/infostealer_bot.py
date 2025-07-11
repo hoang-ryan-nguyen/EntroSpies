@@ -11,6 +11,7 @@ import json
 import os
 import re
 import logging
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from telethon import TelegramClient, events
@@ -427,6 +428,184 @@ def get_download_status(channel_info, message_id, download_dir):
     except Exception:
         return "Error checking status"
 
+
+def normalize_message_text(text):
+    """
+    Normalize message text for content comparison.
+    Removes timestamps, usernames, and formatting inconsistencies.
+    """
+    if not text:
+        return ""
+    
+    # Remove common variable elements
+    normalized = text.lower().strip()
+    
+    # Remove timestamps (various formats)
+    normalized = re.sub(r'\d{4}[-/]\d{2}[-/]\d{2}', '', normalized)
+    normalized = re.sub(r'\d{2}[-/]\d{2}[-/]\d{4}', '', normalized)
+    normalized = re.sub(r'\d{2}:\d{2}:\d{2}', '', normalized)
+    normalized = re.sub(r'\d{2}:\d{2}', '', normalized)
+    
+    # Remove usernames/mentions
+    normalized = re.sub(r'@\w+', '', normalized)
+    
+    # Remove URLs
+    normalized = re.sub(r'https?://\S+', '', normalized)
+    normalized = re.sub(r'www\.\S+', '', normalized)
+    
+    # Remove excessive whitespace
+    normalized = re.sub(r'\s+', ' ', normalized)
+    
+    # Remove common formatting characters
+    normalized = re.sub(r'[*_`~\[\](){}]', '', normalized)
+    
+    return normalized.strip()
+
+
+def generate_content_hash(message_text, media_type=None, media_size=None):
+    """
+    Generate a hash of the message content for duplicate detection.
+    
+    Args:
+        message_text: The message text content
+        media_type: Type of media (if any)
+        media_size: Size of media (if any)
+        
+    Returns:
+        SHA-256 hash of the normalized content
+    """
+    # Normalize the text content
+    normalized_text = normalize_message_text(message_text)
+    
+    # Create content string including media info
+    content_parts = [normalized_text]
+    
+    if media_type:
+        content_parts.append(f"media_type:{media_type}")
+    
+    if media_size:
+        # Round media size to nearest KB to handle small variations
+        size_kb = round(media_size / 1024)
+        content_parts.append(f"media_size_kb:{size_kb}")
+    
+    content_string = "|".join(content_parts)
+    
+    # Generate SHA-256 hash
+    return hashlib.sha256(content_string.encode('utf-8')).hexdigest()
+
+
+def find_content_duplicate(message_text, media_type, media_size, channel_info, download_dir):
+    """
+    Find if a message with similar content already exists.
+    
+    Args:
+        message_text: The message text to check
+        media_type: Type of media (if any)
+        media_size: Size of media (if any)
+        channel_info: Channel information
+        download_dir: Download directory path
+        
+    Returns:
+        Tuple of (is_duplicate: bool, existing_message_id: int, similarity_reason: str)
+    """
+    try:
+        # Generate hash for the new message
+        new_hash = generate_content_hash(message_text, media_type, media_size)
+        
+        channel_dir = sanitize_filename(channel_info['title'])
+        base_path = Path(download_dir) / channel_dir
+        
+        if not base_path.exists():
+            return False, None, None
+        
+        # Search through all existing message files
+        for date_folder in base_path.iterdir():
+            if not date_folder.is_dir():
+                continue
+                
+            for message_file in date_folder.glob("*_message.json"):
+                try:
+                    with open(message_file, 'r', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+                    
+                    # Skip if it's the same message ID (already handled by ID-based detection)
+                    if str(existing_data.get('message_id')) in message_file.name:
+                        continue
+                    
+                    # Generate hash for existing message
+                    existing_text = existing_data.get('text', '')
+                    existing_media_type = existing_data.get('media_type')
+                    existing_media_size = existing_data.get('media_size')
+                    
+                    existing_hash = generate_content_hash(existing_text, existing_media_type, existing_media_size)
+                    
+                    # Check for exact content match
+                    if new_hash == existing_hash:
+                        existing_msg_id = existing_data.get('message_id')
+                        return True, existing_msg_id, f"Exact content match (hash: {new_hash[:12]}...)"
+                    
+                    # Check for text similarity (if both have meaningful text)
+                    if message_text and existing_text:
+                        normalized_new = normalize_message_text(message_text)
+                        normalized_existing = normalize_message_text(existing_text)
+                        
+                        # Check if normalized texts are identical
+                        if normalized_new and normalized_existing and normalized_new == normalized_existing:
+                            # Also check media similarity
+                            media_similar = False
+                            if not media_type and not existing_media_type:
+                                media_similar = True  # Both text-only
+                            elif media_type and existing_media_type:
+                                # Same media type and similar size (within 5%)
+                                if (media_type == existing_media_type and 
+                                    media_size and existing_media_size and
+                                    abs(media_size - existing_media_size) / max(media_size, existing_media_size) <= 0.05):
+                                    media_similar = True
+                            
+                            if media_similar:
+                                existing_msg_id = existing_data.get('message_id')
+                                return True, existing_msg_id, f"Identical normalized text + similar media"
+                    
+                except Exception as e:
+                    # Skip files that can't be read
+                    continue
+        
+        return False, None, None
+        
+    except Exception as e:
+        # If content duplicate detection fails, fall back to no duplicate
+        return False, None, None
+
+
+def is_message_already_downloaded_enhanced(channel_info, message_id, message_text, media_type, media_size, download_dir):
+    """
+    Enhanced duplicate detection that checks both message ID and content.
+    
+    Args:
+        channel_info: Channel information
+        message_id: Message ID to check
+        message_text: Message text content
+        media_type: Type of media (if any)
+        media_size: Size of media (if any)
+        download_dir: Download directory path
+        
+    Returns:
+        Tuple of (is_duplicate: bool, duplicate_reason: str)
+    """
+    # First check ID-based duplicate (existing logic)
+    if is_message_already_downloaded(channel_info, message_id, download_dir):
+        return True, f"Message ID {message_id} already downloaded"
+    
+    # Then check content-based duplicate
+    is_content_dup, existing_msg_id, similarity_reason = find_content_duplicate(
+        message_text, media_type, media_size, channel_info, download_dir
+    )
+    
+    if is_content_dup:
+        return True, f"Content duplicate of message {existing_msg_id}: {similarity_reason}"
+    
+    return False, None
+
 def load_channels_config(config_path, logger, compliance_logger, args):
     """Load channels from channel list file and filter based on arguments."""
     try:
@@ -566,10 +745,17 @@ async def setup_message_listener(client, channels, download_manager, workflow_or
             logger.info(f"New message received from {channel_info['title']}: ID={message.id}")
             compliance_logger.info(f"REALTIME_MESSAGE: Channel={channel_info['title']}, MessageID={message.id}, Date={message.date}")
             
-            # Check if message already downloaded
-            if is_message_already_downloaded(channel_info, message.id, args.output):
-                status = get_download_status(channel_info, message.id, args.output)
-                logger.info(f"Skipping already downloaded message {message.id}: {status}")
+            # Check if message already downloaded (enhanced with content checking)
+            media_type = type(message.media).__name__ if message.media else None
+            media_size = get_media_size(message) if message.media else None
+            
+            is_duplicate, duplicate_reason = is_message_already_downloaded_enhanced(
+                channel_info, message.id, message.text or '', media_type, media_size, args.output
+            )
+            
+            if is_duplicate:
+                logger.info(f"Skipping duplicate message {message.id}: {duplicate_reason}")
+                compliance_logger.info(f"DUPLICATE_SKIPPED: MessageID={message.id}, Reason={duplicate_reason}")
                 return
             
             # Process the message
@@ -674,13 +860,19 @@ async def get_messages_from_channel(client, channel_info, download_manager, args
             
             compliance_logger.info(f"MESSAGE_COLLECTED: Channel={channel_info['title']}, MessageID={message.id}, Date={message.date}")
             
-            # Check if message already downloaded by looking for existing JSON file and attachments
-            if is_message_already_downloaded(channel_info, message.id, args.output):
-                status = get_download_status(channel_info, message.id, args.output)
-                logger.info(f"Skipping already downloaded message {message.id}: {status}")
-                compliance_logger.info(f"DUPLICATE_SKIPPED: MessageID={message.id}, Status={status}")
+            # Check if message already downloaded (enhanced with content checking)
+            media_type = type(message.media).__name__ if message.media else None
+            media_size = get_media_size(message) if message.media else None
+            
+            is_duplicate, duplicate_reason = is_message_already_downloaded_enhanced(
+                channel_info, message.id, message.text or '', media_type, media_size, args.output
+            )
+            
+            if is_duplicate:
+                logger.info(f"Skipping duplicate message {message.id}: {duplicate_reason}")
+                compliance_logger.info(f"DUPLICATE_SKIPPED: MessageID={message.id}, Reason={duplicate_reason}")
                 message_data['duplicate_skipped'] = True
-                message_data['skip_reason'] = f"Already downloaded: {status}"
+                message_data['skip_reason'] = duplicate_reason
                 processed_messages.append(message_data)
                 continue
             
@@ -948,14 +1140,20 @@ async def main_process(args):
         else:
             logger.info(f"[DRY RUN] Would save results to {args.output_file}")
         
-        # Summary with duplicate detection and workflow processing statistics
+        # Enhanced summary with detailed duplicate detection statistics
         downloads_count = sum(len(msg.get('downloaded_files', [])) for msg in all_collected_messages)
         duplicates_skipped = sum(1 for msg in all_collected_messages if msg.get('duplicate_skipped'))
         workflow_processed = sum(1 for msg in all_collected_messages if msg.get('workflow_processing'))
         workflow_successful = sum(1 for msg in all_collected_messages if msg.get('workflow_processing', {}).get('success'))
         
-        logger.info(f"Summary: Channels processed: {len(channels)}, Messages collected: {len(all_collected_messages)}, Downloads completed: {downloads_count}, Duplicates skipped: {duplicates_skipped}, Workflow processed: {workflow_successful}/{workflow_processed}")
-        compliance_logger.info(f"SESSION_SUMMARY: Processed={len(channels)}, Collected={len(all_collected_messages)}, Downloaded={downloads_count}, Duplicates={duplicates_skipped}, Workflow={workflow_successful}/{workflow_processed}")
+        # Count different types of duplicates
+        id_duplicates = sum(1 for msg in all_collected_messages 
+                           if msg.get('duplicate_skipped') and 'Message ID' in msg.get('skip_reason', ''))
+        content_duplicates = sum(1 for msg in all_collected_messages 
+                                if msg.get('duplicate_skipped') and 'Content duplicate' in msg.get('skip_reason', ''))
+        
+        logger.info(f"Summary: Channels processed: {len(channels)}, Messages collected: {len(all_collected_messages)}, Downloads completed: {downloads_count}, Duplicates skipped: {duplicates_skipped} (ID: {id_duplicates}, Content: {content_duplicates}), Workflow processed: {workflow_successful}/{workflow_processed}")
+        compliance_logger.info(f"SESSION_SUMMARY: Processed={len(channels)}, Collected={len(all_collected_messages)}, Downloaded={downloads_count}, Duplicates={duplicates_skipped}, ID_Duplicates={id_duplicates}, Content_Duplicates={content_duplicates}, Workflow={workflow_successful}/{workflow_processed}")
         
     except SessionPasswordNeededError:
         logger.warning("Two-factor authentication is enabled. Please enter your password:")
