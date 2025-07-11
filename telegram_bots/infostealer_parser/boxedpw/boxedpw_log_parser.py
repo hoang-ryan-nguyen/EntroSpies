@@ -115,6 +115,10 @@ class BoxedPwLogParser:
             if self._detect_url_credential_pattern(file_path):
                 return True
             
+            # Check for traditional SOFT:/URL:/USER:/PASS: pattern
+            if self._detect_traditional_credential_pattern(file_path):
+                return True
+            
             # Check filename for credential indicators
             if any(indicator in file_name_lower for indicator in credential_indicators):
                 # Additional check: peek at file content to confirm it contains credential-like data
@@ -204,6 +208,80 @@ class BoxedPwLogParser:
             
         except Exception as e:
             self.logger.debug(f"Error detecting URL credential pattern in {file_path}: {e}")
+            return False
+    
+    def _detect_traditional_credential_pattern(self, file_path: Path) -> bool:
+        """
+        Detect if a file contains traditional SOFT:/URL:/USER:/PASS: credential pattern.
+        
+        Args:
+            file_path: Path to file to check
+            
+        Returns:
+            True if file contains traditional credential pattern
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                sample_content = f.read(4096)  # Read first 4KB for pattern detection
+            
+            lines = sample_content.split('\n')[:100]  # Check first 100 lines
+            traditional_pattern_lines = 0
+            total_valid_lines = 0
+            
+            # Look for traditional credential patterns
+            soft_pattern = re.compile(r'^\s*SOFT:\s*.+', re.IGNORECASE)
+            url_pattern = re.compile(r'^\s*URL:\s*.+', re.IGNORECASE)
+            user_pattern = re.compile(r'^\s*USER:\s*.+', re.IGNORECASE)
+            pass_pattern = re.compile(r'^\s*PASS:\s*.+', re.IGNORECASE)
+            
+            # Track pattern occurrences
+            pattern_counts = {'SOFT': 0, 'URL': 0, 'USER': 0, 'PASS': 0}
+            
+            for line in lines:
+                line = line.strip()
+                
+                # Skip empty lines
+                if not line:
+                    continue
+                
+                total_valid_lines += 1
+                
+                # Check for each pattern type
+                if soft_pattern.match(line):
+                    pattern_counts['SOFT'] += 1
+                    traditional_pattern_lines += 1
+                elif url_pattern.match(line):
+                    pattern_counts['URL'] += 1
+                    traditional_pattern_lines += 1
+                elif user_pattern.match(line):
+                    pattern_counts['USER'] += 1
+                    traditional_pattern_lines += 1
+                elif pass_pattern.match(line):
+                    pattern_counts['PASS'] += 1
+                    traditional_pattern_lines += 1
+            
+            # Check if we have a good distribution of all credential components
+            min_pattern_count = min(pattern_counts.values())
+            max_pattern_count = max(pattern_counts.values())
+            
+            # We need at least some occurrences of each pattern type
+            # and they should be roughly balanced (within 50% of each other)
+            if (min_pattern_count > 0 and 
+                traditional_pattern_lines > 0 and 
+                total_valid_lines > 0 and
+                traditional_pattern_lines / total_valid_lines > 0.3 and
+                max_pattern_count > 0 and
+                min_pattern_count / max_pattern_count > 0.25):
+                
+                self.logger.debug(f"Detected traditional credential file: {file_path.name}")
+                self.logger.debug(f"Pattern counts: {pattern_counts}")
+                self.logger.debug(f"Traditional lines: {traditional_pattern_lines}/{total_valid_lines}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.logger.debug(f"Error detecting traditional credential pattern in {file_path}: {e}")
             return False
     
     def parse_single_log_file(self, log_file: Path, message_file_path: Optional[str] = None,
@@ -372,7 +450,8 @@ class BoxedPwLogParser:
     
     def find_credential_files(self, extract_dir: Path, extracted_files: List[str]) -> List[Path]:
         """
-        Find credential files (like "All Passwords.txt") in extracted archive.
+        Find credential files using content-based detection.
+        Detects both traditional (SOFT:/URL:/USER:/PASS:) and URL:username:password formats.
         
         Args:
             extract_dir: Directory containing extracted files
@@ -384,19 +463,19 @@ class BoxedPwLogParser:
         credential_files = []
         
         try:
-            # Common credential file names
-            credential_filenames = ['All Passwords.txt', 'passwords.txt', 'Password.txt', 'AllPasswords.txt']
+            self.logger.info(f"Scanning {len(extracted_files)} files for credential patterns...")
             
             for file_path in extracted_files:
                 full_path = extract_dir / file_path
                 
                 if full_path.exists() and full_path.is_file():
-                    # Check if filename matches credential file patterns
-                    if full_path.name in credential_filenames:
+                    # Use content-based detection instead of filename matching
+                    if (self._detect_traditional_credential_pattern(full_path) or 
+                        self._detect_url_credential_pattern(full_path)):
                         credential_files.append(full_path)
                         self.logger.debug(f"Found credential file: {full_path}")
             
-            self.logger.info(f"Found {len(credential_files)} credential files")
+            self.logger.info(f"Found {len(credential_files)} credential files using content-based detection")
             
         except Exception as e:
             self.logger.error(f"Error finding credential files: {e}")
@@ -508,7 +587,11 @@ class BoxedPwLogParser:
             country_code = self.extract_country_code(str(credential_file))
             
             # Determine file format and parse accordingly
-            if self._is_colon_separated_format(content):
+            if self._detect_traditional_credential_pattern(credential_file):
+                # Parse traditional format (SOFT:/URL:/USER:/PASS:)
+                self.logger.debug(f"Parsing {credential_file.name} as traditional credentials")
+                credentials.extend(self._parse_traditional_credentials(content, file_timestamp, channel_info, country_code, credential_file))
+            elif self._is_colon_separated_format(content):
                 # Parse colon-separated format (url:username:password)
                 self.logger.debug(f"Parsing {credential_file.name} as colon-separated credentials")
                 colon_credentials = self._parse_colon_separated_credentials(content)
@@ -523,10 +606,9 @@ class BoxedPwLogParser:
                     credential['message_id'] = channel_info['message_id']
                     credential['country_code'] = country_code
                     credentials.append(credential)
-                    
             else:
-                # Parse traditional format (SOFT:/URL:/USER:/PASS:)
-                self.logger.debug(f"Parsing {credential_file.name} as traditional credentials")
+                # Fallback to traditional format parsing
+                self.logger.debug(f"Parsing {credential_file.name} as traditional credentials (fallback)")
                 credentials.extend(self._parse_traditional_credentials(content, file_timestamp, channel_info, country_code, credential_file))
                     
         except Exception as e:

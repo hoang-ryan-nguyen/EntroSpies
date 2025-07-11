@@ -25,6 +25,7 @@ def test_starlink_parsing():
     
     # Test both URL credential file and non-URL file
     non_url_file = Path("/Users/MAC/Projects/EntroSpies/telegram_bots/test_non_url_sample.txt")
+    traditional_file = Path("/Users/MAC/Projects/EntroSpies/telegram_bots/test_traditional_sample.txt")
     
     if not starlink_file.exists():
         print(f"Error: Starlink file not found: {starlink_file}")
@@ -76,6 +77,38 @@ def test_starlink_parsing():
         # Test general credential dump detection
         is_credential_dump_non = parser._is_credential_dump_file(non_url_file)
         print(f"Detected as credential dump: {is_credential_dump_non}")
+    
+    # Test traditional credential file
+    print(f"\n{'='*50}")
+    print("Testing traditional credential file...")
+    print(f"{'='*50}")
+    
+    if traditional_file.exists():
+        print(f"Testing traditional file: {traditional_file}")
+        
+        # Test traditional credential pattern detection
+        is_traditional_pattern = parser._detect_traditional_credential_pattern(traditional_file)
+        print(f"Detected traditional credential pattern: {is_traditional_pattern}")
+        
+        # Test general credential dump detection
+        is_credential_dump_trad = parser._is_credential_dump_file(traditional_file)
+        print(f"Detected as credential dump: {is_credential_dump_trad}")
+        
+        # Test parsing traditional credentials
+        result_trad = parser.parse_single_log_file(traditional_file)
+        print(f"Parsing successful: {result_trad['parsing_successful']}")
+        print(f"Credentials found: {result_trad['credentials_count']}")
+        
+        # Show first few credentials
+        if result_trad['credentials'] and len(result_trad['credentials']) > 0:
+            print(f"\nFirst 3 traditional credentials:")
+            for i, cred in enumerate(result_trad['credentials'][:3]):
+                print(f"  {i+1}. Software: {cred.get('software', 'N/A')}")
+                print(f"      URL: {cred.get('url', 'N/A')}")
+                print(f"      Username: {cred.get('username', 'N/A')}")
+                print(f"      Password: {cred.get('password', 'N/A')}")
+                print(f"      Format: {cred.get('format', 'N/A')}")
+                print()
 
 if __name__ == "__main__":
     test_starlink_parsing()
