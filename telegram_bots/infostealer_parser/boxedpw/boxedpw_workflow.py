@@ -78,6 +78,7 @@ class BoxedPwWorkflow:
         self.config = {
             'max_password_attempts': int(os.getenv('MAX_PASSWORD_ATTEMPTS', 10)),
             'cleanup_failed_extractions': os.getenv('CLEANUP_FAILED_EXTRACTIONS', 'True').lower() == 'true',
+            'cleanup_successful_extractions': os.getenv('CLEANUP_SUCCESSFUL_EXTRACTIONS', 'True').lower() == 'true',
             'cleanup_wrong_password_archives': os.getenv('CLEANUP_WRONG_PASSWORD_ARCHIVES', 'True').lower() == 'true',
             'preserve_original_archives': os.getenv('PRESERVE_ORIGINAL_ARCHIVES', 'True').lower() == 'true',
             'extract_timeout': int(os.getenv('EXTRACTION_TIMEOUT', 300)),  # 5 minutes
@@ -238,6 +239,24 @@ class BoxedPwWorkflow:
                         result['elasticsearch_upload'] = upload_result
                         
                         self.logger.info(f"Elasticsearch upload completed: {upload_result['uploaded']} uploaded, {upload_result['duplicates_skipped']} duplicates, {upload_result['errors']} errors")
+                        
+                        # Step 6a: Cleanup successful extraction if conditions are met
+                        if (self.config['cleanup_successful_extractions'] and 
+                            extraction_result.get('extract_dir') and
+                            credential_parsing_result['total_credentials'] > 1 and
+                            upload_result['uploaded'] > 0):
+                            
+                            self.logger.info(f"Conditions met for successful extraction cleanup: {credential_parsing_result['total_credentials']} credentials, {upload_result['uploaded']} uploaded")
+                            cleanup_success = self._cleanup_successful_extraction_dir(
+                                extraction_result['extract_dir'],
+                                credential_parsing_result['total_credentials'],
+                                upload_result['uploaded']
+                            )
+                            result['extraction_cleanup'] = {
+                                'performed': True,
+                                'success': cleanup_success,
+                                'reason': 'successful_processing_with_credentials'
+                            }
                     else:
                         self.logger.error("Failed to connect to Elasticsearch")
                         result['elasticsearch_upload'] = {
@@ -256,13 +275,38 @@ class BoxedPwWorkflow:
                         'total_processed': 0,
                         'disabled': True
                     }
+                    
+                    # Step 6b: Cleanup successful extraction even when Elasticsearch is disabled (if credentials > 1)
+                    if (self.config['cleanup_successful_extractions'] and 
+                        extraction_result.get('extract_dir') and
+                        credential_parsing_result['total_credentials'] > 1):
+                        
+                        self.logger.info(f"Conditions met for successful extraction cleanup (ES disabled): {credential_parsing_result['total_credentials']} credentials found")
+                        cleanup_success = self._cleanup_successful_extraction_dir(
+                            extraction_result['extract_dir'],
+                            credential_parsing_result['total_credentials'],
+                            0  # No uploads since ES is disabled
+                        )
+                        result['extraction_cleanup'] = {
+                            'performed': True,
+                            'success': cleanup_success,
+                            'reason': 'successful_processing_with_credentials_es_disabled'
+                        }
             
-            # Step 7: Cleanup if configured
-            if extraction_result.get('extract_dir') and self.config['cleanup_failed_extractions']:
+            # Step 7: Cleanup failed extractions if configured and not already cleaned up
+            if (extraction_result.get('extract_dir') and 
+                self.config['cleanup_failed_extractions'] and
+                not result.get('extraction_cleanup', {}).get('performed', False)):
+                
                 if not extraction_result['success']:
                     cleanup_reason = "Wrong password detected" if extraction_result.get('wrong_password_detected') else "Extraction failed"
                     self.logger.info(f"Cleaning up extraction directory due to: {cleanup_reason}")
                     self._cleanup_extraction_dir(extraction_result['extract_dir'])
+                    result['extraction_cleanup'] = {
+                        'performed': True,
+                        'success': True,  # Assume success unless exception
+                        'reason': cleanup_reason.lower().replace(' ', '_')
+                    }
             
             result['success'] = extraction_result['success']
             result['wrong_password_detected'] = extraction_result.get('wrong_password_detected', False)
@@ -675,6 +719,31 @@ class BoxedPwWorkflow:
                 self.logger.info(f"Cleaned up extraction directory: {extract_dir}")
         except Exception as e:
             self.logger.error(f"Error cleaning up extraction directory: {e}")
+    
+    def _cleanup_successful_extraction_dir(self, extract_dir: Path, credentials_count: int, uploaded_count: int) -> bool:
+        """
+        Clean up extraction directory after successful processing while preserving JSON audit files.
+        
+        Args:
+            extract_dir: Directory to clean up
+            credentials_count: Number of credentials found
+            uploaded_count: Number of credentials successfully uploaded to Elasticsearch
+            
+        Returns:
+            True if cleanup successful, False otherwise
+        """
+        try:
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+                self.logger.info(f"Cleaned up successful extraction directory: {extract_dir}")
+                self.logger.info(f"Cleanup reason: {credentials_count} credentials found, {uploaded_count} uploaded to Elasticsearch")
+                return True
+            else:
+                self.logger.warning(f"Extraction directory not found for cleanup: {extract_dir}")
+                return True
+        except Exception as e:
+            self.logger.error(f"Error cleaning up successful extraction directory: {e}")
+            return False
     
     def get_workflow_status(self) -> Dict[str, Any]:
         """
