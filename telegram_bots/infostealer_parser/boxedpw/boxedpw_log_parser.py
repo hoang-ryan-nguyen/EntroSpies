@@ -222,9 +222,9 @@ class BoxedPwLogParser:
         """
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                sample_content = f.read(4096)  # Read first 4KB for pattern detection
+                sample_content = f.read(16384)  # Read first 16KB for better pattern detection
             
-            lines = sample_content.split('\n')[:100]  # Check first 100 lines
+            lines = sample_content.split('\n')[:200]  # Check first 200 lines
             traditional_pattern_lines = 0
             total_valid_lines = 0
             
@@ -264,19 +264,28 @@ class BoxedPwLogParser:
             min_pattern_count = min(pattern_counts.values())
             max_pattern_count = max(pattern_counts.values())
             
-            # We need at least some occurrences of each pattern type
-            # and they should be roughly balanced (within 50% of each other)
+            # Require all 4 patterns to exist (as per user requirement)
+            # and ensure they are reasonably balanced
             if (min_pattern_count > 0 and 
                 traditional_pattern_lines > 0 and 
                 total_valid_lines > 0 and
-                traditional_pattern_lines / total_valid_lines > 0.3 and
+                traditional_pattern_lines >= 4 and  # At least 4 credential lines (1 complete set)
                 max_pattern_count > 0 and
-                min_pattern_count / max_pattern_count > 0.25):
+                min_pattern_count / max_pattern_count > 0.15):  # More flexible pattern balance
                 
                 self.logger.debug(f"Detected traditional credential file: {file_path.name}")
                 self.logger.debug(f"Pattern counts: {pattern_counts}")
                 self.logger.debug(f"Traditional lines: {traditional_pattern_lines}/{total_valid_lines}")
+                self.logger.debug(f"Pattern balance: {min_pattern_count}/{max_pattern_count} = {min_pattern_count/max_pattern_count:.2f}")
                 return True
+            
+            # Log why detection failed for debugging
+            self.logger.debug(f"Traditional credential detection failed for {file_path.name}:")
+            self.logger.debug(f"  Pattern counts: {pattern_counts}")
+            self.logger.debug(f"  Min pattern count: {min_pattern_count}")
+            self.logger.debug(f"  Traditional lines: {traditional_pattern_lines}/{total_valid_lines}")
+            if max_pattern_count > 0:
+                self.logger.debug(f"  Pattern balance: {min_pattern_count/max_pattern_count:.2f}")
             
             return False
             
@@ -441,6 +450,31 @@ class BoxedPwLogParser:
                 'credentials_found': parsing_result['credentials_found'] > 0,
                 'total_credentials': parsing_result['credentials_found']
             }
+            
+            # Log if no credentials were found from log files
+            if parsing_result['credentials_found'] == 0:
+                if len(log_files) == 0:
+                    self.logger.warning("No log files found for credential extraction")
+                else:
+                    self.logger.warning(f"Found {len(log_files)} log files but extracted 0 credentials - potential parser failure")
+                
+                # Log no credentials found with failure logger
+                if self.failure_logger and message_file_path:
+                    analysis_details = {
+                        'log_files_processed': len(log_files),
+                        'files_analyzed': len(extracted_files),
+                        'analysis_method': 'log_file_parsing',
+                        'parsing_errors': parsing_result['parsing_errors']
+                    }
+                    self.failure_logger.log_no_credentials_found(
+                        message_file_path=message_file_path,
+                        extract_dir=extract_dir,
+                        total_files=len(extracted_files),
+                        file_types=parsing_result['file_types'],
+                        analysis_details=analysis_details,
+                        channel_name=channel_name,
+                        message_id=message_id
+                    )
             
         except Exception as e:
             self.logger.error(f"Error parsing extracted logs: {e}")
@@ -722,13 +756,18 @@ class BoxedPwLogParser:
         
         return credentials
     
-    def parse_all_credential_files(self, extract_dir: Path, extracted_files: List[str]) -> Dict[str, Any]:
+    def parse_all_credential_files(self, extract_dir: Path, extracted_files: List[str],
+                                  message_file_path: Optional[str] = None, channel_name: Optional[str] = None,
+                                  message_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Find and parse all credential files in the extracted archive.
         
         Args:
             extract_dir: Directory containing extracted files
             extracted_files: List of extracted file paths
+            message_file_path: Path to message file (for failure logging)
+            channel_name: Channel name (for failure logging)
+            message_id: Message ID (for failure logging)
             
         Returns:
             Dictionary with credential parsing results
@@ -742,12 +781,38 @@ class BoxedPwLogParser:
         }
         
         try:
+            # Analyze file types for logging
+            file_types = {}
+            for file_path in extracted_files:
+                full_path = extract_dir / file_path
+                if full_path.exists() and full_path.is_file():
+                    file_ext = full_path.suffix.lower()
+                    file_types[file_ext] = file_types.get(file_ext, 0) + 1
+            
             # Find credential files
             credential_files = self.find_credential_files(extract_dir, extracted_files)
             result['credential_files_found'] = len(credential_files)
             
             if not credential_files:
-                self.logger.info("No credential files found in extracted archive")
+                self.logger.warning("No credential files found in extracted archive")
+                
+                # Log no credentials found with failure logger
+                if self.failure_logger and message_file_path:
+                    analysis_details = {
+                        'credential_files_found': 0,
+                        'files_analyzed': len(extracted_files),
+                        'analysis_method': 'content_based_detection'
+                    }
+                    self.failure_logger.log_no_credentials_found(
+                        message_file_path=message_file_path,
+                        extract_dir=extract_dir,
+                        total_files=len(extracted_files),
+                        file_types=file_types,
+                        analysis_details=analysis_details,
+                        channel_name=channel_name,
+                        message_id=message_id
+                    )
+                
                 return result
             
             # Parse each credential file
@@ -783,6 +848,28 @@ class BoxedPwLogParser:
                     result['credential_files'].append(file_result)
             
             self.logger.info(f"Credential parsing completed: {result['total_credentials']} credentials from {result['credential_files_found']} files")
+            
+            # Log if credential files were found but no credentials were extracted
+            if result['credential_files_found'] > 0 and result['total_credentials'] == 0:
+                self.logger.warning(f"Found {result['credential_files_found']} credential files but extracted 0 credentials - potential parser failure")
+                
+                # Log no credentials found with failure logger
+                if self.failure_logger and message_file_path:
+                    analysis_details = {
+                        'credential_files_found': result['credential_files_found'],
+                        'files_analyzed': len(extracted_files),
+                        'analysis_method': 'content_based_detection',
+                        'parsing_errors': result['parsing_errors']
+                    }
+                    self.failure_logger.log_no_credentials_found(
+                        message_file_path=message_file_path,
+                        extract_dir=extract_dir,
+                        total_files=len(extracted_files),
+                        file_types=file_types,
+                        analysis_details=analysis_details,
+                        channel_name=channel_name,
+                        message_id=message_id
+                    )
             
         except Exception as e:
             self.logger.error(f"Error in credential file parsing: {e}")

@@ -65,6 +65,7 @@ class ParsingFailureLogger:
             'VALIDATION_FAILED': 'Extracted data failed validation',
             'PARSER_ERROR': 'Parser encountered an error',
             'TIMEOUT': 'Processing timeout occurred',
+            'NO_CREDENTIALS_FOUND': 'No credentials found in decompressed folder',
             'UNKNOWN': 'Unknown parsing failure'
         }
         
@@ -280,6 +281,55 @@ class ParsingFailureLogger:
             message_file_path=message_file_path,
             failure_category='FORMAT_UNSUPPORTED',
             failure_reason=f'Unsupported file format: {file_format}',
+            channel_name=channel_name,
+            message_id=message_id,
+            error_details=error_details
+        )
+    
+    def log_no_credentials_found(self,
+                                message_file_path: Union[str, Path],
+                                extract_dir: Union[str, Path],
+                                total_files: int,
+                                file_types: Dict[str, int],
+                                analysis_details: Dict[str, Any],
+                                channel_name: Optional[str] = None,
+                                message_id: Optional[int] = None) -> None:
+        """
+        Log when no credentials are found in decompressed folder.
+        This may indicate parser failure or empty/invalid files.
+        
+        Args:
+            message_file_path: Path to the message file
+            extract_dir: Directory that was analyzed
+            total_files: Total number of files in extracted directory
+            file_types: Dictionary of file extensions and their counts
+            analysis_details: Detailed analysis results
+            channel_name: Channel name
+            message_id: Message ID
+        """
+        error_details = {
+            'extract_directory': str(extract_dir),
+            'total_files': total_files,
+            'file_types': file_types,
+            'credential_files_found': analysis_details.get('credential_files_found', 0),
+            'log_files_processed': analysis_details.get('log_files_processed', 0),
+            'files_analyzed': analysis_details.get('files_analyzed', 0),
+            'analysis_method': analysis_details.get('analysis_method', 'unknown'),
+            'potential_parser_failure': total_files > 0 and analysis_details.get('credential_files_found', 0) == 0
+        }
+        
+        # Determine failure reason based on analysis
+        if total_files == 0:
+            failure_reason = "No files found in decompressed folder"
+        elif analysis_details.get('credential_files_found', 0) == 0:
+            failure_reason = f"No credential files detected in {total_files} files (potential parser failure)"
+        else:
+            failure_reason = f"Credential files found but no credentials extracted from {analysis_details.get('credential_files_found', 0)} files"
+        
+        self.log_failure(
+            message_file_path=message_file_path,
+            failure_category='NO_CREDENTIALS_FOUND',
+            failure_reason=failure_reason,
             channel_name=channel_name,
             message_id=message_id,
             error_details=error_details
