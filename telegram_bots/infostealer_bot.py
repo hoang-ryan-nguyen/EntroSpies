@@ -15,6 +15,10 @@ from datetime import datetime
 from pathlib import Path
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, ChannelPrivateError, FloodWaitError
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import custom modules
 from logger import setup_logging
